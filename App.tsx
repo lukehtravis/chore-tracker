@@ -519,11 +519,13 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
               className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
             >
               <option value="">Select person...</option>
-              {people.map((person) => (
-                <option key={person.id} value={person.id}>
-                  {person.name}
-                </option>
-              ))}
+              {[...people]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name}
+                  </option>
+                ))}
             </select>
           </div>
 
@@ -537,11 +539,13 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
               className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
             >
               <option value="">Select chore...</option>
-              {chores.map((chore) => (
-                <option key={chore.id} value={chore.id}>
-                  {chore.name} ({chore.minutes} min)
-                </option>
-              ))}
+              {[...chores]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((chore) => (
+                  <option key={chore.id} value={chore.id}>
+                    {chore.name} ({chore.minutes} min)
+                  </option>
+                ))}
             </select>
           </div>
         </div>
@@ -1488,11 +1492,13 @@ function AdminView({ people, chores, assignments, db }) {
               className="px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
             >
               <option value="">Select person...</option>
-              {people.map((person) => (
-                <option key={person.id} value={person.id}>
-                  {person.name}
-                </option>
-              ))}
+              {[...people]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name}
+                  </option>
+                ))}
             </select>
             <select
               value={selectedChoreForAssignment}
@@ -1500,11 +1506,13 @@ function AdminView({ people, chores, assignments, db }) {
               className="px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
             >
               <option value="">Select chore...</option>
-              {chores.map((chore) => (
-                <option key={chore.id} value={chore.id}>
-                  {chore.name}
-                </option>
-              ))}
+              {[...chores]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((chore) => (
+                  <option key={chore.id} value={chore.id}>
+                    {chore.name}
+                  </option>
+                ))}
             </select>
             <input
               type="number"

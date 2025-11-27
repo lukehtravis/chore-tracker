@@ -433,10 +433,15 @@ function CalendarView({
                     const chore = chores.find(
                       (c) => c.id === completion.choreId
                     );
+                    const choreName = chore?.name || "";
+                    const displayName =
+                      choreName.length > 10
+                        ? choreName.substring(0, 10) + "..."
+                        : choreName;
                     return (
                       <div
                         key={idx}
-                        className="completion-dot w-2.5 h-2.5 rounded-full"
+                        className="completion-dot px-2 py-0.5 rounded-full text-white text-xs font-medium whitespace-nowrap"
                         style={{
                           backgroundColor: personColors[completion.completedBy],
                         }}
@@ -444,7 +449,9 @@ function CalendarView({
                           people.find((p) => p.id === completion.completedBy)
                             ?.name
                         }: ${chore?.name}`}
-                      />
+                      >
+                        {displayName}
+                      </div>
                     );
                   })}
                 </div>

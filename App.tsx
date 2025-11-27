@@ -612,7 +612,7 @@ function AnalysisView({
 
   // Get array of last N months
   const getLastNMonths = (n) => {
-    const months = [];
+    const months: { key: string; label: string; date: Date }[] = [];
     for (let i = n - 1; i >= 0; i--) {
       const d = new Date(year, month - i, 1);
       months.push({
@@ -628,7 +628,10 @@ function AnalysisView({
   };
 
   // Calculate stats for each person
-  const calculatePersonStats = (personId, monthFilter = null) => {
+  const calculatePersonStats = (
+    personId,
+    monthFilter: string | null = null
+  ) => {
     const personAssignments = assignments.filter(
       (a) => a.personId === personId
     );
@@ -1045,128 +1048,155 @@ function AnalysisView({
       {/* History - Long Term View */}
       {selectedTab === "history" && (
         <div className="space-y-6">
-          {/* Time range selector */}
-          <div className="flex items-center gap-4 mb-4">
-            <span className="text-sm text-stone-600">Show last:</span>
-            <div className="flex gap-2 p-1 bg-stone-100 rounded-xl">
-              {[3, 6, 12].map((n) => (
-                <button
-                  key={n}
-                  onClick={() => setHistoryMonths(n)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                    historyMonths === n
-                      ? "bg-white card-shadow text-stone-800"
-                      : "text-stone-600 hover:text-stone-800"
-                  }`}
-                >
-                  {n} months
-                </button>
-              ))}
-            </div>
-          </div>
+          {(() => {
+            // Start from the last N months relative to the currently selected month
+            const baseMonths = getLastNMonths(historyMonths);
+            const realCurrentMonthKey = getMonthKey(new Date());
 
-          {/* History Table */}
-          <div className="bg-white rounded-2xl card-shadow overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="bg-stone-50 border-b border-stone-200">
-                    <th className="text-left p-4 font-semibold text-stone-700 sticky left-0 bg-stone-50">
-                      Person
-                    </th>
-                    {getLastNMonths(historyMonths).map((m) => (
-                      <th
-                        key={m.key}
-                        className="text-center p-4 font-semibold text-stone-700 min-w-24"
+            // Filter out months where nobody has any completions (everyone is effectively 0%),
+            // but always keep the real current month so the latest period is visible.
+            const historyMonthsToShow = baseMonths.filter((m) => {
+              if (m.key === realCurrentMonthKey) return true;
+              return people.some((person) => {
+                const stats = calculatePersonStats(person.id, m.key);
+                return stats.completedMinutes > 0;
+              });
+            });
+
+            return (
+              <>
+                {/* Time range selector */}
+                <div className="flex items-center gap-4 mb-4">
+                  <span className="text-sm text-stone-600">Show last:</span>
+                  <div className="flex gap-2 p-1 bg-stone-100 rounded-xl">
+                    {[3, 6, 12].map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => setHistoryMonths(n)}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                          historyMonths === n
+                            ? "bg-white card-shadow text-stone-800"
+                            : "text-stone-600 hover:text-stone-800"
+                        }`}
                       >
-                        {m.label}
-                      </th>
+                        {n} months
+                      </button>
                     ))}
-                    <th className="text-center p-4 font-semibold text-stone-700 min-w-28 bg-amber-50">
-                      Total
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {people.map((person, pIdx) => {
-                    const monthData = getLastNMonths(historyMonths).map((m) => {
-                      const stats = calculatePersonStats(person.id, m.key);
-                      return stats;
-                    });
-                    const totalCompleted = monthData.reduce(
-                      (sum, m) => sum + m.completedMinutes,
-                      0
-                    );
-                    const totalExpected = monthData.reduce(
-                      (sum, m) => sum + m.expectedMinutes,
-                      0
-                    );
-                    const totalPct =
-                      totalExpected > 0
-                        ? Math.round((totalCompleted / totalExpected) * 100)
-                        : 0;
+                  </div>
+                </div>
 
-                    return (
-                      <tr
-                        key={person.id}
-                        className="border-b border-stone-100 hover:bg-stone-50/50"
-                      >
-                        <td className="p-4 font-medium text-stone-800 sticky left-0 bg-white">
-                          {person.name}
-                        </td>
-                        {monthData.map((stats, mIdx) => (
-                          <td key={mIdx} className="p-4 text-center">
-                            <div className="flex flex-col items-center gap-1">
-                              <span className="text-stone-800 font-medium">
-                                {stats.completedMinutes}
-                              </span>
-                              <span className="text-xs text-stone-400">
-                                / {stats.expectedMinutes}
-                              </span>
-                              <span
-                                className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                                  stats.percentage >= 100
-                                    ? "bg-green-100 text-green-700"
-                                    : stats.percentage >= 75
-                                    ? "bg-amber-100 text-amber-700"
-                                    : stats.percentage >= 50
-                                    ? "bg-orange-100 text-orange-700"
-                                    : "bg-red-100 text-red-700"
-                                }`}
-                              >
-                                {stats.percentage}%
-                              </span>
-                            </div>
-                          </td>
-                        ))}
-                        <td className="p-4 text-center bg-amber-50/50">
-                          <div className="flex flex-col items-center gap-1">
-                            <span className="text-stone-800 font-bold">
-                              {totalCompleted}
-                            </span>
-                            <span className="text-xs text-stone-500">
-                              / {totalExpected} min
-                            </span>
-                            <span
-                              className={`text-sm font-bold ${
-                                totalPct >= 100
-                                  ? "text-green-600"
-                                  : totalPct >= 75
-                                  ? "text-amber-600"
-                                  : "text-red-600"
-                              }`}
+                {/* History Table */}
+                <div className="bg-white rounded-2xl card-shadow overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="bg-stone-50 border-b border-stone-200">
+                          <th className="text-left p-4 font-semibold text-stone-700 sticky left-0 bg-stone-50">
+                            Person
+                          </th>
+                          {historyMonthsToShow.map((m) => (
+                            <th
+                              key={m.key}
+                              className="text-center p-4 font-semibold text-stone-700 min-w-24"
                             >
-                              {totalPct}%
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
+                              {m.label}
+                            </th>
+                          ))}
+                          <th className="text-center p-4 font-semibold text-stone-700 min-w-28 bg-amber-50">
+                            Total
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {people.map((person) => {
+                          const monthData = historyMonthsToShow.map((m) =>
+                            calculatePersonStats(person.id, m.key)
+                          );
+                          const totalCompleted = monthData.reduce(
+                            (sum, m) => sum + m.completedMinutes,
+                            0
+                          );
+                          const totalExpected = monthData.reduce(
+                            (sum, m) => sum + m.expectedMinutes,
+                            0
+                          );
+                          const totalPct =
+                            totalExpected > 0
+                              ? Math.round(
+                                  (totalCompleted / totalExpected) * 100
+                                )
+                              : 0;
+
+                          return (
+                            <tr
+                              key={person.id}
+                              className="border-b border-stone-100 hover:bg-stone-50/50"
+                            >
+                              <td className="p-4 font-medium text-stone-800 sticky left-0 bg-white">
+                                {person.name}
+                              </td>
+                              {monthData.map((stats, mIdx) => (
+                                <td key={mIdx} className="p-4 text-center">
+                                  <div className="flex flex-col items-center gap-1">
+                                    <span className="text-stone-800 font-medium">
+                                      {stats.completedMinutes}
+                                    </span>
+                                    <span className="text-xs text-stone-400">
+                                      / {stats.expectedMinutes}
+                                    </span>
+                                    <span
+                                      className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                                        stats.percentage >= 100
+                                          ? "bg-green-100 text-green-700"
+                                          : stats.percentage >= 75
+                                          ? "bg-amber-100 text-amber-700"
+                                          : stats.percentage >= 50
+                                          ? "bg-orange-100 text-orange-700"
+                                          : "bg-red-100 text-red-700"
+                                      }`}
+                                    >
+                                      {stats.percentage}%
+                                    </span>
+                                  </div>
+                                </td>
+                              ))}
+                              <td className="p-4 text-center bg-amber-50/50">
+                                <div className="flex flex-col items-center gap-1">
+                                  <span className="text-stone-800 font-bold">
+                                    {totalCompleted}
+                                  </span>
+                                  <span className="text-xs text-stone-500">
+                                    / {totalExpected} min
+                                  </span>
+                                  <span
+                                    className={`text-sm font-bold ${
+                                      totalPct >= 100
+                                        ? "text-green-600"
+                                        : totalPct >= 75
+                                        ? "text-amber-600"
+                                        : "text-red-600"
+                                    }`}
+                                  >
+                                    {totalPct}%
+                                  </span>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <p className="text-xs text-stone-500">
+                  Months where nobody recorded any completions are hidden
+                  (except the current month) so the averages aren&apos;t skewed
+                  by missing data.
+                </p>
+              </>
+            );
+          })()}
 
           {/* Chore breakdown per person */}
           <div className="grid gap-4 md:grid-cols-2">

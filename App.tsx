@@ -617,7 +617,7 @@ function AnalysisView({
       const d = new Date(year, month - i, 1);
       months.push({
         key: getMonthKey(d),
-        label: `${monthNames[d.getMonth()].substring(0, 3)} ${d
+        label: `${monthNames[d.getMonth()].substring(0, 3)} '${d
           .getFullYear()
           .toString()
           .slice(-2)}`,

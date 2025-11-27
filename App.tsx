@@ -907,24 +907,137 @@ function AnalysisView({
 
       {/* House Total */}
       {selectedTab === "house" && (
-        <div className="bg-white rounded-2xl card-shadow p-8 max-w-lg mx-auto">
-          <div className="text-center">
-            <div className="inline-block mb-4">
-              <ProgressRing
-                percentage={house.percentage}
-                size={120}
-                strokeWidth={8}
-              />
+        <div className="space-y-6">
+          {/* Summary Card */}
+          <div className="bg-white rounded-2xl card-shadow p-8 max-w-lg mx-auto">
+            <div className="text-center">
+              <div className="inline-block mb-4">
+                <ProgressRing
+                  percentage={house.percentage}
+                  size={120}
+                  strokeWidth={8}
+                />
+              </div>
+              <h3 className="font-display text-2xl font-semibold text-stone-800 mb-2">
+                House Progress
+              </h3>
+              <p className="text-lg text-stone-600">
+                {house.completed} / {house.expected} minutes completed
+              </p>
+              <p className="text-3xl font-bold text-stone-800 mt-4">
+                {house.percentage}%
+              </p>
             </div>
-            <h3 className="font-display text-2xl font-semibold text-stone-800 mb-2">
-              House Progress
+          </div>
+
+          {/* Chore List */}
+          <div className="bg-white rounded-2xl card-shadow p-6 max-w-2xl mx-auto">
+            <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+              Chore Completion Status
             </h3>
-            <p className="text-lg text-stone-600">
-              {house.completed} / {house.expected} minutes completed
-            </p>
-            <p className="text-3xl font-bold text-stone-800 mt-4">
-              {house.percentage}%
-            </p>
+            {(() => {
+              // Get all completions for the current month
+              const monthCompletions = completions.filter((c) =>
+                c.date.startsWith(monthKey)
+              );
+
+              // Calculate expected and completed instances per chore
+              const choreStatus = {};
+
+              // Initialize with all assignments
+              assignments.forEach((assignment) => {
+                const chore = chores.find((c) => c.id === assignment.choreId);
+                if (chore) {
+                  if (!choreStatus[assignment.choreId]) {
+                    choreStatus[assignment.choreId] = {
+                      choreId: assignment.choreId,
+                      choreName: chore.name,
+                      expected: 0,
+                      completed: 0,
+                    };
+                  }
+                  choreStatus[assignment.choreId].expected +=
+                    assignment.timesPerMonth;
+                }
+              });
+
+              // Count completions
+              monthCompletions.forEach((completion) => {
+                if (choreStatus[completion.choreId]) {
+                  choreStatus[completion.choreId].completed += 1;
+                }
+              });
+
+              // Convert to array and sort by completion status (incomplete first, then by name)
+              const choreList = Object.values(choreStatus).sort((a, b) => {
+                const aComplete = a.completed >= a.expected;
+                const bComplete = b.completed >= b.expected;
+                if (aComplete !== bComplete) {
+                  return aComplete ? 1 : -1; // Incomplete first
+                }
+                return a.choreName.localeCompare(b.choreName);
+              });
+
+              if (choreList.length === 0) {
+                return (
+                  <p className="text-center py-8 text-stone-500">
+                    No chores assigned yet. Go to Admin to assign chores.
+                  </p>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  {choreList.map((chore) => {
+                    const isComplete = chore.completed >= chore.expected;
+                    return (
+                      <div
+                        key={chore.choreId}
+                        className={`flex items-center justify-between p-4 rounded-xl transition-all ${
+                          isComplete
+                            ? "bg-green-50/50 border border-green-100"
+                            : "bg-stone-50 border border-stone-100"
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 flex-1">
+                          <span
+                            className={`font-medium text-stone-800 ${
+                              isComplete ? "line-through text-stone-500" : ""
+                            }`}
+                          >
+                            {chore.choreName}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-sm font-medium ${
+                              isComplete ? "text-green-700" : "text-stone-600"
+                            }`}
+                          >
+                            {chore.completed} / {chore.expected}
+                          </span>
+                          {isComplete && (
+                            <svg
+                              className="w-5 h-5 text-green-600"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M5 13l4 4L19 7"
+                              />
+                            </svg>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}

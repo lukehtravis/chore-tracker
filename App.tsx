@@ -1485,34 +1485,36 @@ function AdminView({ people, chores, assignments, db }) {
 
           {/* People List */}
           <div className="space-y-2">
-            {people.map((person) => (
-              <div
-                key={person.id}
-                className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
-              >
-                <span className="font-medium text-stone-800">
-                  {person.name}
-                </span>
-                <button
-                  onClick={() => deletePerson(person.id)}
-                  className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+            {[...people]
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((person) => (
+                <div
+                  key={person.id}
+                  className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
                 >
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
+                  <span className="font-medium text-stone-800">
+                    {person.name}
+                  </span>
+                  <button
+                    onClick={() => deletePerson(person.id)}
+                    className="p-2 text-stone-400 hover:text-red-500 transition-colors"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                    />
-                  </svg>
-                </button>
-              </div>
-            ))}
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              ))}
             {people.length === 0 && (
               <p className="text-center py-8 text-stone-500">
                 No people added yet.
@@ -1555,39 +1557,41 @@ function AdminView({ people, chores, assignments, db }) {
 
           {/* Chores List */}
           <div className="space-y-2">
-            {chores.map((chore) => (
-              <div
-                key={chore.id}
-                className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
-              >
-                <div>
-                  <span className="font-medium text-stone-800">
-                    {chore.name}
-                  </span>
-                  <span className="ml-2 text-sm text-stone-500">
-                    ({chore.minutes} min)
-                  </span>
-                </div>
-                <button
-                  onClick={() => deleteChore(chore.id)}
-                  className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+            {[...chores]
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((chore) => (
+                <div
+                  key={chore.id}
+                  className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
                 >
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
+                  <div>
+                    <span className="font-medium text-stone-800">
+                      {chore.name}
+                    </span>
+                    <span className="ml-2 text-sm text-stone-500">
+                      ({chore.minutes} min)
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => deleteChore(chore.id)}
+                    className="p-2 text-stone-400 hover:text-red-500 transition-colors"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                    />
-                  </svg>
-                </button>
-              </div>
-            ))}
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              ))}
             {chores.length === 0 && (
               <p className="text-center py-8 text-stone-500">
                 No chores added yet.

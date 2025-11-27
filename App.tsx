@@ -1651,12 +1651,15 @@ function AdminView({ people, chores, assignments, db }) {
 
           {/* Assignments List */}
           <div className="space-y-2">
-            {assignments.map((assignment) => {
-              const person = people.find((p) => p.id === assignment.personId);
-              const chore = chores.find((c) => c.id === assignment.choreId);
-              if (!person || !chore) return null;
-
-              return (
+            {[...assignments]
+              .map((assignment) => {
+                const person = people.find((p) => p.id === assignment.personId);
+                const chore = chores.find((c) => c.id === assignment.choreId);
+                return { assignment, person, chore };
+              })
+              .filter((item) => item.person && item.chore)
+              .sort((a, b) => a.person.name.localeCompare(b.person.name))
+              .map(({ assignment, person, chore }) => (
                 <div
                   key={assignment.id}
                   className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
@@ -1691,8 +1694,7 @@ function AdminView({ people, chores, assignments, db }) {
                     </svg>
                   </button>
                 </div>
-              );
-            })}
+              ))}
             {assignments.length === 0 && (
               <p className="text-center py-8 text-stone-500">
                 No assignments yet. Add people and chores first, then assign

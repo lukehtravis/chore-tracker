@@ -5,7 +5,6 @@ import {
   collection,
   doc,
   setDoc,
-  getDocs,
   onSnapshot,
   deleteDoc,
   updateDoc,

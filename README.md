@@ -1,6 +1,6 @@
 # Chore Tracker
 
-A React-based chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions.
+A chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions.
 
 ## Features
 

@@ -571,7 +571,8 @@ function RecordChoreModal({
       minutes: minutesDone,
       createdAt: nowIso,
       // Who this chore was done for; can be the same as selectedPerson
-      forPersonId: forPersonId || null,
+      // If not explicitly chosen, default to the person who did the chore
+      forPersonId: forPersonId || selectedPerson,
     });
 
     // Debt logic:

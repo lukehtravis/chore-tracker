@@ -42,6 +42,8 @@ export default function App() {
   const [chores, setChores] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [completions, setCompletions] = useState([]);
+  const [debts, setDebts] = useState([]);
+  const [debtPayments, setDebtPayments] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [showRecordModal, setShowRecordModal] = useState(false);
@@ -70,12 +72,25 @@ export default function App() {
         );
       }
     );
+    const unsubDebts = onSnapshot(collection(db, "debts"), (snapshot) => {
+      setDebts(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+    });
+    const unsubDebtPayments = onSnapshot(
+      collection(db, "debtPayments"),
+      (snapshot) => {
+        setDebtPayments(
+          snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+        );
+      }
+    );
 
     return () => {
       unsubPeople();
       unsubChores();
       unsubAssignments();
       unsubCompletions();
+      unsubDebts();
+      unsubDebtPayments();
     };
   }, []);
 
@@ -214,6 +229,7 @@ export default function App() {
             chores={chores}
             assignments={assignments}
             completions={completions}
+            debts={debts}
             currentMonth={currentMonth}
             setCurrentMonth={setCurrentMonth}
           />
@@ -235,6 +251,7 @@ export default function App() {
           people={people}
           chores={chores}
           assignments={assignments}
+          debts={debts}
           onClose={() => {
             setShowRecordModal(false);
             setSelectedDate(null);
@@ -470,14 +487,47 @@ function CalendarView({
 }
 
 // Record Chore Modal
-function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
+function RecordChoreModal({
+  date,
+  people,
+  chores,
+  assignments,
+  debts,
+  onClose,
+  db,
+}) {
   const [selectedPerson, setSelectedPerson] = useState("");
   const [selectedChore, setSelectedChore] = useState("");
   const [saving, setSaving] = useState(false);
   const [isPartial, setIsPartial] = useState(false);
   const [partialMinutes, setPartialMinutes] = useState("");
+  const [forPersonId, setForPersonId] = useState("");
+  const [dueDate, setDueDate] = useState("");
 
   const selectedChoreObj = chores.find((c) => c.id === selectedChore);
+
+  const isCrossPerson =
+    selectedPerson && forPersonId && selectedPerson !== forPersonId;
+
+  // Determine if there are existing open debts between selectedPerson (debtor) and forPersonId (creditor)
+  const openDebtsBetween =
+    isCrossPerson && debts && debts.length > 0
+      ? debts
+          .filter(
+            (d) =>
+              d.debtorId === selectedPerson &&
+              d.creditorId === forPersonId &&
+              (d.remainingMinutes ?? d.originalMinutes ?? 0) > 0
+          )
+          .sort((a, b) => {
+            const aDate = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const bDate = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            return aDate - bDate;
+          })
+      : [];
+
+  const isPayment = isCrossPerson && openDebtsBetween.length > 0;
+  const isNewDebt = isCrossPerson && openDebtsBetween.length === 0;
 
   const getMinuteOptions = () => {
     if (!selectedChoreObj || !selectedChoreObj.minutes) return [];
@@ -498,22 +548,80 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
     if (!selectedPerson || !selectedChore) return;
     if (isPartial && !partialMinutes) return;
 
+    if (isNewDebt && !dueDate) {
+      // Require a due date when this completion will create a new debt
+      return;
+    }
+
     setSaving(true);
 
-    const id = generateId();
+    const completionId = generateId();
     const chore = chores.find((c) => c.id === selectedChore);
     const minutesDone = isPartial
       ? parseInt(partialMinutes, 10)
       : chore?.minutes ?? 0;
 
-    await setDoc(doc(db, "completions", id), {
-      id,
+    const nowIso = new Date().toISOString();
+
+    await setDoc(doc(db, "completions", completionId), {
+      id: completionId,
       date,
       completedBy: selectedPerson,
       choreId: selectedChore,
       minutes: minutesDone,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
+      // Who this chore was done for; can be the same as selectedPerson
+      forPersonId: forPersonId || null,
     });
+
+    // Debt logic:
+    // - If the chore was done for another person (forPersonId !== selectedPerson),
+    //   and there are existing debts where selectedPerson is the debtor and
+    //   forPersonId is the creditor, auto-apply minutes oldest-first as payments.
+    // - If there are no such existing debts, create a new debt from forPersonId (debtor)
+    //   to selectedPerson (creditor) for the full minutesDone, with a manually chosen dueDate.
+    if (isCrossPerson) {
+      if (isPayment) {
+        let pool = minutesDone;
+        for (const debt of openDebtsBetween) {
+          const remaining =
+            debt.remainingMinutes ?? debt.originalMinutes ?? 0;
+          if (remaining <= 0 || pool <= 0) continue;
+          const apply = Math.min(pool, remaining);
+          if (apply <= 0) continue;
+
+          const paymentId = generateId();
+          await setDoc(doc(db, "debtPayments", paymentId), {
+            id: paymentId,
+            debtId: debt.id,
+            completionId: completionId,
+            minutesApplied: apply,
+            createdAt: nowIso,
+          });
+
+          await updateDoc(doc(db, "debts", debt.id), {
+            remainingMinutes: remaining - apply,
+          });
+
+          pool -= apply;
+          if (pool <= 0) break;
+        }
+      } else if (isNewDebt) {
+        const debtId = generateId();
+        await setDoc(doc(db, "debts", debtId), {
+          id: debtId,
+          creditorId: selectedPerson,
+          debtorId: forPersonId,
+          choreId: selectedChore,
+          originalMinutes: minutesDone,
+          remainingMinutes: minutesDone,
+          createdAt: nowIso,
+          // Store the date string directly; we can interpret it as needed in the UI
+          dueDate: dueDate || null,
+          sourceCompletionId: completionId,
+        });
+      }
+    }
 
     setSaving(false);
     onClose();
@@ -624,6 +732,58 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
               </select>
             </div>
           )}
+
+          {/* Who was this chore for? */}
+          <div>
+            <label className="block text-sm font-medium text-stone-700 mb-2">
+              Who was this chore for?
+            </label>
+            <select
+              value={forPersonId}
+              onChange={(e) => setForPersonId(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+            >
+              <option value="">Select person...</option>
+              {[...people]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name}
+                  </option>
+                ))}
+            </select>
+            {isCrossPerson && isPayment && (
+              <p className="mt-1 text-xs text-stone-500">
+                There are existing open debts where{" "}
+                {
+                  people.find((p) => p.id === selectedPerson)?.name
+                }{" "}
+                owes{" "}
+                {people.find((p) => p.id === forPersonId)?.name}. This
+                completion will automatically pay down the oldest debts
+                first.
+              </p>
+            )}
+          </div>
+
+          {/* Due date for new debts */}
+          {isNewDebt && (
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-2">
+                Due date for this favor
+              </label>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+              />
+              <p className="mt-1 text-xs text-stone-500">
+                This is when the person you did this for should pay you
+                back.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3 mt-6">
@@ -639,7 +799,8 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
               !selectedPerson ||
               !selectedChore ||
               saving ||
-              (isPartial && !partialMinutes)
+              (isPartial && !partialMinutes) ||
+              (isNewDebt && !dueDate)
             }
             className="flex-1 px-4 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -657,6 +818,7 @@ function AnalysisView({
   chores,
   assignments,
   completions,
+  debts,
   currentMonth,
   setCurrentMonth,
 }) {
@@ -760,80 +922,19 @@ function AnalysisView({
     );
   };
 
-  // Calculate who owes whom
-  const calculateDebts = () => {
-    const debts = {};
-
-    // Initialize debt matrix
-    people.forEach((p1) => {
-      debts[p1.id] = {};
-      people.forEach((p2) => {
-        if (p1.id !== p2.id) debts[p1.id][p2.id] = 0;
-      });
-    });
-
-    // Process completions to find "done for others"
-    completions.forEach((completion) => {
-      // Determine day-of-week for this completion (0-6, Sunday-Saturday)
-      const completionDate = new Date(completion.date + "T12:00:00");
-      const completionDayOfWeek = completionDate.getDay();
-
-      // Find matching assignment:
-      //  - Prefer a day-specific assignment where both choreId and dayOfWeek match
-      //  - Fallback to a regular assignment (no dayOfWeek) for that chore
-      const assignmentsForChore = assignments.filter(
-        (a) => a.choreId === completion.choreId
-      );
-
-      let choreAssignment =
-        assignmentsForChore.find(
-          (a) => a.dayOfWeek === completionDayOfWeek
-        ) ||
-        assignmentsForChore.find(
-          (a) => a.dayOfWeek === null || a.dayOfWeek === undefined
-        );
-
-      if (choreAssignment && choreAssignment.personId !== completion.completedBy) {
-        const chore = chores.find((c) => c.id === completion.choreId);
-        if (chore) {
-          const minutesDone = completion.minutes;
-          // The assigned person owes the completer
-          const owedBy = choreAssignment.personId;
-          const owedTo = completion.completedBy;
-          if (debts[owedBy] && debts[owedBy][owedTo] !== undefined) {
-            debts[owedBy][owedTo] += minutesDone;
-          }
-        }
+  const getDebtStatus = (debt) => {
+    const remaining =
+      debt.remainingMinutes ?? debt.originalMinutes ?? 0;
+    if (remaining <= 0) return "paid";
+    if (debt.dueDate) {
+      const today = new Date();
+      const due = new Date(debt.dueDate);
+      if (due < new Date(today.getFullYear(), today.getMonth(), today.getDate())) {
+        return "overdue";
       }
-    });
-
-    // Simplify debts (net out mutual debts)
-    const simplifiedDebts = [];
-    const processed = new Set();
-
-    people.forEach((p1) => {
-      people.forEach((p2) => {
-        if (p1.id !== p2.id && !processed.has(`${p1.id}-${p2.id}`)) {
-          const debt1to2 = debts[p1.id]?.[p2.id] || 0;
-          const debt2to1 = debts[p2.id]?.[p1.id] || 0;
-          const net = debt1to2 - debt2to1;
-
-          if (net > 0) {
-            simplifiedDebts.push({ from: p1.id, to: p2.id, minutes: net });
-          } else if (net < 0) {
-            simplifiedDebts.push({ from: p2.id, to: p1.id, minutes: -net });
-          }
-
-          processed.add(`${p1.id}-${p2.id}`);
-          processed.add(`${p2.id}-${p1.id}`);
-        }
-      });
-    });
-
-    return simplifiedDebts;
+    }
+    return "open";
   };
-
-  const debts = calculateDebts();
 
   // Calculate house totals
   const houseStats = () => {
@@ -1364,58 +1465,203 @@ function AnalysisView({
 
       {/* Debts */}
       {selectedTab === "debts" && (
-        <div className="bg-white rounded-2xl card-shadow p-6">
-          <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
-            Chore Debts
-          </h3>
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl card-shadow p-6">
+            <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+              Chore Debts
+            </h3>
+            {debts.length === 0 || people.length === 0 ? (
+              <p className="text-center py-8 text-stone-500">
+                No debts yet. When someone does a chore for someone else,
+                we&apos;ll track that here.
+              </p>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                {people.map((person) => {
+                  const owedBy = debts.filter(
+                    (d) =>
+                      d.debtorId === person.id &&
+                      (d.remainingMinutes ?? d.originalMinutes ?? 0) > 0
+                  );
+                  const owedTo = debts.filter(
+                    (d) =>
+                      d.creditorId === person.id &&
+                      (d.remainingMinutes ?? d.originalMinutes ?? 0) > 0
+                  );
 
-          {debts.length > 0 ? (
-            <div className="space-y-3">
-              {debts.map((debt, idx) => {
-                const fromPerson = people.find((p) => p.id === debt.from);
-                const toPerson = people.find((p) => p.id === debt.to);
-                return (
-                  <div
-                    key={idx}
-                    className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="font-medium text-stone-800">
-                        {fromPerson?.name}
-                      </span>
-                      <svg
-                        className="w-5 h-5 text-stone-400"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M17 8l4 4m0 0l-4 4m4-4H3"
-                        />
-                      </svg>
-                      <span className="font-medium text-stone-800">
-                        {toPerson?.name}
-                      </span>
+                  const totalOwe = owedBy.reduce(
+                    (sum, d) =>
+                      sum +
+                      (d.remainingMinutes ?? d.originalMinutes ?? 0),
+                    0
+                  );
+                  const totalOwed = owedTo.reduce(
+                    (sum, d) =>
+                      sum +
+                      (d.remainingMinutes ?? d.originalMinutes ?? 0),
+                    0
+                  );
+
+                  if (owedBy.length === 0 && owedTo.length === 0) {
+                    return null;
+                  }
+
+                  return (
+                    <div
+                      key={person.id}
+                      className="bg-stone-50 rounded-2xl border border-stone-100 p-4"
+                    >
+                      <h4 className="font-display text-lg font-semibold text-stone-800 mb-2">
+                        {person.name}
+                      </h4>
+                      <div className="text-sm text-stone-600 mb-3">
+                        <span className="mr-4">
+                          You owe:{" "}
+                          <span className="font-semibold text-amber-700">
+                            {totalOwe} min
+                          </span>
+                        </span>
+                        <span>
+                          You are owed:{" "}
+                          <span className="font-semibold text-emerald-700">
+                            {totalOwed} min
+                          </span>
+                        </span>
+                      </div>
+
+                      {owedTo.length > 0 && (
+                        <div className="mb-3">
+                          <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-1">
+                            Others owe you
+                          </p>
+                          <div className="space-y-1">
+                            {owedTo.map((d) => {
+                              const debtor = people.find(
+                                (p) => p.id === d.debtorId
+                              );
+                              const chore = chores.find(
+                                (c) => c.id === d.choreId
+                              );
+                              const remaining =
+                                d.remainingMinutes ??
+                                d.originalMinutes ??
+                                0;
+                              const status = getDebtStatus(d);
+                              return (
+                                <div
+                                  key={d.id}
+                                  className="flex items-center justify-between rounded-xl bg-white px-3 py-2"
+                                >
+                                  <div>
+                                    <p className="text-sm font-medium text-stone-800">
+                                      {debtor?.name}{" "}
+                                      {chore
+                                        ? `(${chore.name})`
+                                        : ""}
+                                    </p>
+                                    <p className="text-xs text-stone-500">
+                                      Remaining {remaining} min
+                                      {d.dueDate && (
+                                        <>
+                                          {" "}
+                                          • due {d.dueDate}
+                                        </>
+                                      )}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                                      status === "overdue"
+                                        ? "bg-red-100 text-red-700"
+                                        : status === "open"
+                                        ? "bg-amber-100 text-amber-700"
+                                        : "bg-emerald-100 text-emerald-700"
+                                    }`}
+                                  >
+                                    {status === "overdue"
+                                      ? "Overdue"
+                                      : status === "open"
+                                      ? "Open"
+                                      : "Paid"}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {owedBy.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-1">
+                            You owe others
+                          </p>
+                          <div className="space-y-1">
+                            {owedBy.map((d) => {
+                              const creditor = people.find(
+                                (p) => p.id === d.creditorId
+                              );
+                              const chore = chores.find(
+                                (c) => c.id === d.choreId
+                              );
+                              const remaining =
+                                d.remainingMinutes ??
+                                d.originalMinutes ??
+                                0;
+                              const status = getDebtStatus(d);
+                              return (
+                                <div
+                                  key={d.id}
+                                  className="flex items-center justify-between rounded-xl bg-white px-3 py-2"
+                                >
+                                  <div>
+                                    <p className="text-sm font-medium text-stone-800">
+                                      {creditor?.name}{" "}
+                                      {chore
+                                        ? `(${chore.name})`
+                                        : ""}
+                                    </p>
+                                    <p className="text-xs text-stone-500">
+                                      Remaining {remaining} min
+                                      {d.dueDate && (
+                                        <>
+                                          {" "}
+                                          • due {d.dueDate}
+                                        </>
+                                      )}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                                      status === "overdue"
+                                        ? "bg-red-100 text-red-700"
+                                        : status === "open"
+                                        ? "bg-amber-100 text-amber-700"
+                                        : "bg-emerald-100 text-emerald-700"
+                                    }`}
+                                  >
+                                    {status === "overdue"
+                                      ? "Overdue"
+                                      : status === "open"
+                                      ? "Open"
+                                      : "Paid"}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <span className="text-lg font-bold text-amber-600">
-                      {debt.minutes} min
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-center py-8 text-stone-500">
-              No one owes anyone chores! 🎉
-            </p>
-          )}
-
-          <p className="mt-4 text-sm text-stone-500">
-            Debts are calculated when someone does a chore assigned to another
-            person.
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-stone-500">
+            Debts are created when someone does a chore for someone else,
+            and are paid down automatically (oldest-first) when the debtor
+            later does chores for the creditor.
           </p>
         </div>
       )}

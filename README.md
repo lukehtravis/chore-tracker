@@ -1,6 +1,6 @@
 # Chore Tracker
 
-A chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions. This application provides a calendar-based interface for recording chore completions, tracks individual and household performance metrics, and calculates chore debts when someone completes a chore assigned to another person.
+A chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions. This application provides a calendar-based interface for recording chore completions, tracks individual and household performance metrics, and models chore debts as first-class records when someone does a chore for someone else.
 
 ## Original Requirements
 
@@ -17,7 +17,7 @@ The application was built to fulfill the following requirements:
   - Individual performance (total time, percentage of expected, monthly breakdown)
   - House-wide totals and percentages
   - Long-term history per person
-  - Debt tracking (who owes whom minutes when chores are done for others)
+  - Debt tracking (who owes whom specific chores and minutes when chores are done for others)
 
 ## Features
 
@@ -26,7 +26,7 @@ The application was built to fulfill the following requirements:
   - Individual performance tracking with monthly breakdowns
   - House-wide totals and progress
   - Historical data across multiple months (3, 6, or 12 month views)
-  - Debt tracking (who owes whom chores)
+  - Debt tracking (who owes whom chores, with per-debt detail and progress)
   - Chore completion status tracking
 - **Admin Panel**: Manage people, chores, and assignments
 - **Day-Specific Chores**: Optional day-of-week assignments for recurring weekly chores
@@ -55,7 +55,7 @@ All data is stored in Firebase Firestore and synchronized in real-time using `on
 
 ### Firebase Collections
 
-The application uses four Firestore collections:
+The application uses six Firestore collections:
 
 #### 1. `people` Collection
 
@@ -131,6 +131,7 @@ interface Completion {
   choreId: string;      // Reference to chore.id (which chore was done)
   minutes: number;      // Minutes recorded for this completion (full or partial)
   createdAt: string;    // ISO timestamp of when the record was created
+  forPersonId: string | null; // Reference to person.id this chore was done for (can be same as completedBy)
 }
 ```
 
@@ -139,6 +140,49 @@ interface Completion {
 - Create: Record completion via calendar day click
 - Read: Real-time listener syncs all completions
 - Delete: Not currently implemented in UI (would require manual Firestore deletion)
+
+#### 5. `debts` Collection
+
+Stores chore debts as explicit obligations between two people, created when someone does a chore for someone else and there is no existing debt in that direction.
+
+```typescript
+interface Debt {
+  id: string;               // Unique identifier (generated)
+  creditorId: string;       // Person who is owed time (did the original favor)
+  debtorId: string;         // Person who owes time back
+  choreId: string;          // Chore that created this debt
+  originalMinutes: number;  // Total minutes of the original favor
+  remainingMinutes: number; // Minutes still owed on this debt
+  createdAt: string;        // ISO timestamp when the debt was created
+  dueDate: string | null;   // Due date (YYYY-MM-DD) for paying back the favor
+  sourceCompletionId: string; // ID of completion that created this debt
+}
+```
+
+**Operations:**
+
+- Create: When a cross-person completion is recorded and there are no existing debts from debtor to creditor
+- Read: Real-time listener syncs all debts
+- Update: `remainingMinutes` is reduced automatically as payments are applied
+
+#### 6. `debtPayments` Collection
+
+Stores how individual chore completions pay down existing debts.
+
+```typescript
+interface DebtPayment {
+  id: string;            // Unique identifier (generated)
+  debtId: string;        // Reference to debt.id
+  completionId: string;  // Reference to completion.id used as payment
+  minutesApplied: number; // Minutes from this completion applied to the debt
+  createdAt: string;     // ISO timestamp when payment was recorded
+}
+```
+
+**Operations:**
+
+- Create: When a cross-person completion is recorded and there are existing debts from debtor to creditor
+- Read: (Optional) for audit/history views or debugging
 
 ### Data Relationships
 
@@ -192,19 +236,37 @@ percentage = expectedMinutes > 0
 
 ### Debt Calculation
 
-Debts are calculated when someone completes a chore assigned to another person:
+Debts are tracked as explicit `Debt` documents and are based on **who a chore was done for**, not inferred automatically from assignments.
 
-1. **Find Matching Assignment**: For each completion, find the assignment that matches:
-   - For day-specific chores: `choreId` matches AND `dayOfWeek` matches the completion date's day of week
-   - For regular chores: `choreId` matches AND `dayOfWeek` is undefined/null
+1. **Recording a cross-person completion**:
+   - When recording a completion, the user selects both:
+     - **Who did the chore** (`completedBy`)
+     - **Who it was done for** (`forPersonId`)
+   - If `forPersonId` is empty or equals `completedBy`, no debt logic is applied.
+   - If `forPersonId !== completedBy`, this is treated as a favor from `completedBy` (creditor) to `forPersonId` (debtor).
 
-2. **Check Assignment Mismatch**: If `assignment.personId !== completion.completedBy`, a debt is created:
-   - `debts[assignment.personId][completion.completedBy] += completion.minutes`
-   - The assigned person owes the completer
+2. **Finding existing debts (oldest-first auto payment)**:
+   - For a cross-person completion where `completedBy = X` and `forPersonId = Y`, the system looks for open debts where:
+     - `debtorId === X` and `creditorId === Y`
+     - `remainingMinutes > 0`
+   - If such debts exist, the completion is treated as a **payment**:
+     - The completion’s minutes are applied oldest-first across those debts.
+     - For each application:
+       - A `DebtPayment` record is created.
+       - The corresponding `Debt.remainingMinutes` is reduced.
 
-3. **Net Debt Simplification**: Mutual debts are netted out:
-   - If Person A owes Person B 100 minutes and Person B owes Person A 30 minutes
-   - The simplified debt is: Person A owes Person B 70 minutes
+3. **Creating new debts**:
+   - If no open debts exist from `completedBy` to `forPersonId` when recording a cross-person completion, a **new `Debt` document** is created:
+     - `creditorId = completedBy`
+     - `debtorId = forPersonId`
+     - `originalMinutes = remainingMinutes = completion.minutes`
+     - `dueDate` is manually selected in the UI when saving the completion.
+
+4. **Debt status**:
+   - In the UI, debts are labeled based on:
+     - `remainingMinutes <= 0` → **Paid**
+     - `remainingMinutes > 0` and `dueDate` in the past → **Overdue**
+     - Otherwise → **Open**
 
 ### Month Key Format
 
@@ -233,6 +295,9 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
    - Selected date (formatted as "Weekday, Month Day, Year")
    - Dropdown to select who did the chore
    - Dropdown to select which chore was done
+   - Checkbox and selector for partial completions (optional)
+   - Dropdown to select **who the chore was done for** (can be the same person)
+   - If the chore is done for someone else and will create a new debt, a **due date** field is required
 4. Click "Save" to record the completion
 5. Calendar updates in real-time with color-coded dots showing completions
 
@@ -244,7 +309,7 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
    - **Individual**: See each person's stats for current month and all-time
    - **House Total**: Aggregate statistics and chore completion status
    - **History**: Multi-month table showing trends (3, 6, or 12 months)
-   - **Who Owes Who**: Debt matrix showing net chore debts
+   - **Debts**: Per-person view of debts owed and owed-to, with per-debt details (chore, minutes, due date, status)
 
 ## Component Architecture
 
@@ -285,12 +350,20 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `people`: Array of all people
 - `chores`: Array of all chores
 - `assignments`: Array of all assignments (not currently used in modal)
+- `debts`: Array of all debts (used to determine whether a cross-person completion is a new debt or a payment)
 - `onClose`: Function to close modal
 - `db`: Firestore database instance
 
 **Features:**
-- Form to select person and chore
-- Saves completion record to Firestore
+- Form to select:
+  - Who did the chore
+  - Which chore was done
+  - Whether it was a partial completion and how many minutes
+  - **Who the chore was done for**
+- Saves completion record to Firestore with `forPersonId`
+- Automatically:
+  - Creates a new `Debt` (with manual due date) when a favor is done for someone and no existing debts exist in that direction
+  - Applies payments oldest-first to existing debts when the debtor does a chore for the creditor
 - Formatted date display
 
 ### AnalysisView Component
@@ -302,6 +375,7 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `completions`: Array of all completions
 - `currentMonth`: Date object for analysis month
 - `setCurrentMonth`: Function to change month
+- `debts`: Array of all debts
 
 **Features:**
 - Tab navigation (Individual, House Total, History, Debts)
@@ -313,7 +387,6 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 
 **Key Functions:**
 - `calculatePersonStats(personId, monthFilter)`: Calculates expected, completed, percentage, and breakdown
-- `calculateDebts()`: Computes debt matrix and simplifies to net debts
 - `houseStats()`: Aggregates all people's stats for current month
 - `getLastNMonths(n)`: Generates array of month objects for history view
 
@@ -516,7 +589,6 @@ People are assigned colors from a predefined palette based on their index in the
 
 When an assignment has a `dayOfWeek` value:
 - The assignment only applies to that day of the week
-- Debt calculations match completions to assignments by both `choreId` and `dayOfWeek`
 - Multiple assignments can exist for the same person-chore pair if they have different `dayOfWeek` values
 
 ### History View Filtering

@@ -506,8 +506,37 @@ function RecordChoreModal({
 
   const selectedChoreObj = chores.find((c) => c.id === selectedChore);
 
+  // People who are explicitly assigned this chore (used to limit "who was this chore for" options)
+  const assignedPeopleForChore =
+    selectedChore && assignments && assignments.length > 0
+      ? [
+          ...new Map(
+            assignments
+              .filter((a) => a.choreId === selectedChore)
+              .map((a) => {
+                const person = people.find((p) => p.id === a.personId);
+                return person ? [person.id, person] : null;
+              })
+              .filter((entry) => entry !== null)
+          ).values(),
+        ]
+      : [];
+
+  const hasAssigneesForChore = assignedPeopleForChore.length > 0;
+  const isPersonAssignedToSelectedChore =
+    !!selectedPerson &&
+    assignedPeopleForChore.some((p) => p.id === selectedPerson);
+
   const isCrossPerson =
     selectedPerson && forPersonId && selectedPerson !== forPersonId;
+
+  // Only show "Who was this chore for?" when there are assignees for this chore
+  // and the person who did it is NOT one of those assignees.
+  const shouldShowForPersonDropdown =
+    hasAssigneesForChore &&
+    !!selectedChore &&
+    !!selectedPerson &&
+    !isPersonAssignedToSelectedChore;
 
   // Determine if there are existing open debts between selectedPerson (debtor) and forPersonId (creditor)
   const openDebtsBetween =
@@ -734,33 +763,35 @@ function RecordChoreModal({
           )}
 
           {/* Who was this chore for? */}
-          <div>
-            <label className="block text-sm font-medium text-stone-700 mb-2">
-              Who was this chore for? (Defaults to you if not selected)
-            </label>
-            <select
-              value={forPersonId}
-              onChange={(e) => setForPersonId(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
-            >
-              <option value="">Select person...</option>
-              {[...people]
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map((person) => (
-                  <option key={person.id} value={person.id}>
-                    {person.name}
-                  </option>
-                ))}
-            </select>
-            {isCrossPerson && isPayment && (
-              <p className="mt-1 text-xs text-stone-500">
-                There are existing open debts where{" "}
-                {people.find((p) => p.id === selectedPerson)?.name} owes{" "}
-                {people.find((p) => p.id === forPersonId)?.name}. This
-                completion will automatically pay down the oldest debts first.
-              </p>
-            )}
-          </div>
+          {shouldShowForPersonDropdown && (
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-2">
+                Who was this chore for?
+              </label>
+              <select
+                value={forPersonId}
+                onChange={(e) => setForPersonId(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+              >
+                <option value="">Select person...</option>
+                {assignedPeopleForChore
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((person) => (
+                    <option key={person.id} value={person.id}>
+                      {person.name}
+                    </option>
+                  ))}
+              </select>
+              {isCrossPerson && isPayment && (
+                <p className="mt-1 text-xs text-stone-500">
+                  There are existing open debts where{" "}
+                  {people.find((p) => p.id === selectedPerson)?.name} owes{" "}
+                  {people.find((p) => p.id === forPersonId)?.name}. This
+                  completion will automatically pay down the oldest debts first.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Due date for new debts */}
           {isNewDebt && (
@@ -795,7 +826,10 @@ function RecordChoreModal({
               !selectedChore ||
               saving ||
               (isPartial && !partialMinutes) ||
-              (isNewDebt && !dueDate)
+              (isNewDebt && !dueDate) ||
+              // If the person who did the chore is not assigned this chore,
+              // require that the user explicitly choose who it was for.
+              (shouldShowForPersonDropdown && !forPersonId)
             }
             className="flex-1 px-4 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >

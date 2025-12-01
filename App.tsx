@@ -474,17 +474,44 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
   const [selectedPerson, setSelectedPerson] = useState("");
   const [selectedChore, setSelectedChore] = useState("");
   const [saving, setSaving] = useState(false);
+  const [isPartial, setIsPartial] = useState(false);
+  const [partialMinutes, setPartialMinutes] = useState("");
+
+  const selectedChoreObj = chores.find((c) => c.id === selectedChore);
+
+  const getMinuteOptions = () => {
+    if (!selectedChoreObj || !selectedChoreObj.minutes) return [];
+    const total = selectedChoreObj.minutes;
+    // Use 5-minute increments for nicer UX, falling back to 1-minute steps for small chores
+    const step = total <= 15 ? 1 : 5;
+    const options = [];
+    for (let m = step; m <= total; m += step) {
+      options.push(m);
+    }
+    if (!options.includes(total)) {
+      options.push(total);
+    }
+    return options;
+  };
 
   const handleSave = async () => {
     if (!selectedPerson || !selectedChore) return;
+    if (isPartial && !partialMinutes) return;
+
     setSaving(true);
 
     const id = generateId();
+    const chore = chores.find((c) => c.id === selectedChore);
+    const minutesDone = isPartial
+      ? parseInt(partialMinutes, 10)
+      : chore?.minutes ?? 0;
+
     await setDoc(doc(db, "completions", id), {
       id,
       date,
       completedBy: selectedPerson,
       choreId: selectedChore,
+      minutes: minutesDone,
       createdAt: new Date().toISOString(),
     });
 
@@ -555,6 +582,48 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
                 ))}
             </select>
           </div>
+
+          {/* Partial completion controls */}
+          <div className="flex items-center gap-2">
+            <input
+              id="partial-checkbox"
+              type="checkbox"
+              checked={isPartial}
+              onChange={(e) => {
+                setIsPartial(e.target.checked);
+                if (!e.target.checked) {
+                  setPartialMinutes("");
+                }
+              }}
+              className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
+            />
+            <label
+              htmlFor="partial-checkbox"
+              className="text-sm font-medium text-stone-700"
+            >
+              Partial
+            </label>
+          </div>
+
+          {isPartial && selectedChoreObj && (
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-2">
+                Minutes completed (up to {selectedChoreObj.minutes} min)
+              </label>
+              <select
+                value={partialMinutes}
+                onChange={(e) => setPartialMinutes(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+              >
+                <option value="">Select minutes...</option>
+                {getMinuteOptions().map((m) => (
+                  <option key={m} value={m}>
+                    {m} min
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3 mt-6">
@@ -566,7 +635,12 @@ function RecordChoreModal({ date, people, chores, assignments, onClose, db }) {
           </button>
           <button
             onClick={handleSave}
-            disabled={!selectedPerson || !selectedChore || saving}
+            disabled={
+              !selectedPerson ||
+              !selectedChore ||
+              saving ||
+              (isPartial && !partialMinutes)
+            }
             className="flex-1 px-4 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? "Saving..." : "Save"}
@@ -659,9 +733,9 @@ function AnalysisView({
     personCompletions.forEach((completion) => {
       const chore = chores.find((c) => c.id === completion.choreId);
       if (chore) {
-        completedMinutes += chore.minutes;
+        completedMinutes += completion.minutes;
         choreBreakdown[chore.name] =
-          (choreBreakdown[chore.name] || 0) + chore.minutes;
+          (choreBreakdown[chore.name] || 0) + completion.minutes;
       }
     });
 
@@ -709,11 +783,12 @@ function AnalysisView({
       ) {
         const chore = chores.find((c) => c.id === completion.choreId);
         if (chore) {
+          const minutesDone = completion.minutes;
           // The assigned person owes the completer
           const owedBy = choreAssignment.personId;
           const owedTo = completion.completedBy;
           if (debts[owedBy] && debts[owedBy][owedTo] !== undefined) {
-            debts[owedBy][owedTo] += chore.minutes;
+            debts[owedBy][owedTo] += minutesDone;
           }
         }
       }
@@ -944,7 +1019,7 @@ function AnalysisView({
                 c.date.startsWith(monthKey)
               );
 
-              // Calculate expected and completed instances per chore
+              // Calculate expected and completed minutes per chore
               const choreStatus = {};
 
               // Initialize with all assignments
@@ -955,26 +1030,34 @@ function AnalysisView({
                     choreStatus[assignment.choreId] = {
                       choreId: assignment.choreId,
                       choreName: chore.name,
-                      expected: 0,
-                      completed: 0,
+                      expectedMinutes: 0,
+                      completedMinutes: 0,
                     };
                   }
-                  choreStatus[assignment.choreId].expected +=
-                    assignment.timesPerMonth;
+                  choreStatus[assignment.choreId].expectedMinutes +=
+                    assignment.timesPerMonth * chore.minutes;
                 }
               });
 
               // Count completions
               monthCompletions.forEach((completion) => {
                 if (choreStatus[completion.choreId]) {
-                  choreStatus[completion.choreId].completed += 1;
+                  const chore = chores.find((c) => c.id === completion.choreId);
+                  if (chore) {
+                    choreStatus[completion.choreId].completedMinutes +=
+                      completion.minutes;
+                  }
                 }
               });
 
               // Convert to array and sort by completion status (incomplete first, then by name)
               const choreList = Object.values(choreStatus).sort((a, b) => {
-                const aComplete = a.completed >= a.expected;
-                const bComplete = b.completed >= b.expected;
+                const aComplete =
+                  a.completedMinutes >= a.expectedMinutes &&
+                  a.expectedMinutes > 0;
+                const bComplete =
+                  b.completedMinutes >= b.expectedMinutes &&
+                  b.expectedMinutes > 0;
                 if (aComplete !== bComplete) {
                   return aComplete ? 1 : -1; // Incomplete first
                 }
@@ -992,7 +1075,9 @@ function AnalysisView({
               return (
                 <div className="space-y-3">
                   {choreList.map((chore) => {
-                    const isComplete = chore.completed >= chore.expected;
+                    const isComplete =
+                      chore.completedMinutes >= chore.expectedMinutes &&
+                      chore.expectedMinutes > 0;
                     return (
                       <div
                         key={chore.choreId}
@@ -1017,7 +1102,8 @@ function AnalysisView({
                               isComplete ? "text-green-700" : "text-stone-600"
                             }`}
                           >
-                            {chore.completed} / {chore.expected}
+                            {chore.completedMinutes} / {chore.expectedMinutes}{" "}
+                            min
                           </span>
                           {isComplete && (
                             <svg
@@ -1217,7 +1303,7 @@ function AnalysisView({
                     };
                   }
                   choreAgg[chore.id].count++;
-                  choreAgg[chore.id].totalMinutes += chore.minutes;
+                  choreAgg[chore.id].totalMinutes += c.minutes;
                 }
               });
               const sortedChores = Object.values(choreAgg).sort(

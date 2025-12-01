@@ -129,6 +129,7 @@ interface Completion {
   date: string;         // Date in "YYYY-MM-DD" format
   completedBy: string;  // Reference to person.id (who did the chore)
   choreId: string;      // Reference to chore.id (which chore was done)
+  minutes: number;      // Minutes recorded for this completion (full or partial)
   createdAt: string;    // ISO timestamp of when the record was created
 }
 ```
@@ -175,7 +176,7 @@ For a given person and time period:
 ```typescript
 completedMinutes = sum(
   for each completion where completedBy === person.id:
-    chore.minutes
+    completion.minutes
 )
 ```
 
@@ -198,7 +199,7 @@ Debts are calculated when someone completes a chore assigned to another person:
    - For regular chores: `choreId` matches AND `dayOfWeek` is undefined/null
 
 2. **Check Assignment Mismatch**: If `assignment.personId !== completion.completedBy`, a debt is created:
-   - `debts[assignment.personId][completion.completedBy] += chore.minutes`
+   - `debts[assignment.personId][completion.completedBy] += completion.minutes`
    - The assigned person owes the completer
 
 3. **Net Debt Simplification**: Mutual debts are netted out:

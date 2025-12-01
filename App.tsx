@@ -504,15 +504,34 @@ function RecordChoreModal({
   const [forPersonId, setForPersonId] = useState("");
   const [dueDate, setDueDate] = useState("");
 
+  // Determine the day of week for this completion (0-6, Sunday-Saturday)
+  const completionDayOfWeek = date
+    ? new Date(date + "T12:00:00").getDay()
+    : null;
+
   const selectedChoreObj = chores.find((c) => c.id === selectedChore);
 
-  // People who are explicitly assigned this chore (used to limit "who was this chore for" options)
+  // People who are explicitly assigned this chore for the given date:
+  // - Day-specific assignments (dayOfWeek matches the completion date)
+  // - Any-day assignments (dayOfWeek is null/undefined)
   const assignedPeopleForChore =
     selectedChore && assignments && assignments.length > 0
       ? [
           ...new Map(
             assignments
-              .filter((a) => a.choreId === selectedChore)
+              .filter((a) => {
+                if (a.choreId !== selectedChore) return false;
+                const aDay =
+                  a.dayOfWeek === undefined || a.dayOfWeek === null
+                    ? null
+                    : a.dayOfWeek;
+
+                // Any-day assignment
+                if (aDay === null) return true;
+                // Day-specific: must match the completion's day of week
+                if (completionDayOfWeek === null) return false;
+                return aDay === completionDayOfWeek;
+              })
               .map((a) => {
                 const person = people.find((p) => p.id === a.personId);
                 return person ? [person.id, person] : null;
@@ -806,7 +825,7 @@ function RecordChoreModal({
                 className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
               />
               <p className="mt-1 text-xs text-stone-500">
-                This is when the person you did this for should pay you back.
+                This is when the person you did this for should pay you back by.
               </p>
             </div>
           )}

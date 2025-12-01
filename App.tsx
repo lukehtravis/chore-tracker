@@ -709,7 +709,7 @@ function RecordChoreModal({
               htmlFor="partial-checkbox"
               className="text-sm font-medium text-stone-700"
             >
-              Partial (If you are recording only part of a chore being done)
+              Partial Chore Completion
             </label>
           </div>
 
@@ -736,7 +736,7 @@ function RecordChoreModal({
           {/* Who was this chore for? */}
           <div>
             <label className="block text-sm font-medium text-stone-700 mb-2">
-              Who was this chore for?
+              Who was this chore for? (Defaults to you if not selected)
             </label>
             <select
               value={forPersonId}

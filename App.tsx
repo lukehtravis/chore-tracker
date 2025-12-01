@@ -774,13 +774,26 @@ function AnalysisView({
 
     // Process completions to find "done for others"
     completions.forEach((completion) => {
-      const choreAssignment = assignments.find(
+      // Determine day-of-week for this completion (0-6, Sunday-Saturday)
+      const completionDate = new Date(completion.date + "T12:00:00");
+      const completionDayOfWeek = completionDate.getDay();
+
+      // Find matching assignment:
+      //  - Prefer a day-specific assignment where both choreId and dayOfWeek match
+      //  - Fallback to a regular assignment (no dayOfWeek) for that chore
+      const assignmentsForChore = assignments.filter(
         (a) => a.choreId === completion.choreId
       );
-      if (
-        choreAssignment &&
-        choreAssignment.personId !== completion.completedBy
-      ) {
+
+      let choreAssignment =
+        assignmentsForChore.find(
+          (a) => a.dayOfWeek === completionDayOfWeek
+        ) ||
+        assignmentsForChore.find(
+          (a) => a.dayOfWeek === null || a.dayOfWeek === undefined
+        );
+
+      if (choreAssignment && choreAssignment.personId !== completion.completedBy) {
         const chore = chores.find((c) => c.id === completion.choreId);
         if (chore) {
           const minutesDone = completion.minutes;
@@ -1471,6 +1484,18 @@ function AdminView({ people, chores, assignments, db }) {
   const [selectedChoreForAssignment, setSelectedChoreForAssignment] =
     useState("");
   const [timesPerMonth, setTimesPerMonth] = useState("");
+  const [isDaySpecific, setIsDaySpecific] = useState(false);
+  const [dayOfWeek, setDayOfWeek] = useState("");
+
+  const dayNamesLong = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+  ];
 
   const addPerson = async () => {
     if (!newPersonName.trim()) return;
@@ -1517,16 +1542,32 @@ function AdminView({ people, chores, assignments, db }) {
     )
       return;
 
-    // Check if assignment already exists
-    const existing = assignments.find(
-      (a) =>
-        a.personId === selectedPersonForAssignment &&
-        a.choreId === selectedChoreForAssignment
-    );
+    const parsedTimesPerMonth = parseInt(timesPerMonth, 10);
+    if (Number.isNaN(parsedTimesPerMonth) || parsedTimesPerMonth <= 0) return;
+
+    const dayOfWeekValue =
+      isDaySpecific && dayOfWeek !== "" ? parseInt(dayOfWeek, 10) : null;
+
+    // Check if assignment already exists for this person/chore/dayOfWeek combo
+    const existing = assignments.find((a) => {
+      if (
+        a.personId !== selectedPersonForAssignment ||
+        a.choreId !== selectedChoreForAssignment
+      ) {
+        return false;
+      }
+
+      const aDay =
+        a.dayOfWeek === undefined || a.dayOfWeek === null ? null : a.dayOfWeek;
+      const targetDay = dayOfWeekValue === null ? null : dayOfWeekValue;
+
+      return aDay === targetDay;
+    });
 
     if (existing) {
       await updateDoc(doc(db, "assignments", existing.id), {
-        timesPerMonth: parseInt(timesPerMonth),
+        timesPerMonth: parsedTimesPerMonth,
+        dayOfWeek: dayOfWeekValue,
       });
     } else {
       const id = generateId();
@@ -1534,13 +1575,16 @@ function AdminView({ people, chores, assignments, db }) {
         id,
         personId: selectedPersonForAssignment,
         choreId: selectedChoreForAssignment,
-        timesPerMonth: parseInt(timesPerMonth),
+        timesPerMonth: parsedTimesPerMonth,
+        dayOfWeek: dayOfWeekValue,
       });
     }
 
     setSelectedPersonForAssignment("");
     setSelectedChoreForAssignment("");
     setTimesPerMonth("");
+    setIsDaySpecific(false);
+    setDayOfWeek("");
   };
 
   const deleteAssignment = async (id) => {
@@ -1769,6 +1813,44 @@ function AdminView({ people, chores, assignments, db }) {
             </button>
           </div>
 
+          {/* Day-specific (weekly) option */}
+          <div className="flex flex-wrap items-center gap-3 mb-6">
+            <div className="flex items-center gap-2">
+              <input
+                id="day-specific-toggle"
+                type="checkbox"
+                checked={isDaySpecific}
+                onChange={(e) => {
+                  setIsDaySpecific(e.target.checked);
+                  if (!e.target.checked) {
+                    setDayOfWeek("");
+                  }
+                }}
+                className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
+              />
+              <label
+                htmlFor="day-specific-toggle"
+                className="text-sm font-medium text-stone-700"
+              >
+                Day-specific (weekly kitchen duty style)
+              </label>
+            </div>
+            {isDaySpecific && (
+              <select
+                value={dayOfWeek}
+                onChange={(e) => setDayOfWeek(e.target.value)}
+                className="px-4 py-2 rounded-xl border border-stone-200 bg-stone-50 text-sm"
+              >
+                <option value="">Select day of week...</option>
+                {dayNamesLong.map((name, idx) => (
+                  <option key={idx} value={idx}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
           {/* Assignments List */}
           <div className="space-y-2">
             {[...assignments]
@@ -1794,6 +1876,12 @@ function AdminView({ people, chores, assignments, db }) {
                       ({assignment.timesPerMonth}x/month ={" "}
                       {chore.minutes * assignment.timesPerMonth} min)
                     </span>
+                    {assignment.dayOfWeek !== undefined &&
+                      assignment.dayOfWeek !== null && (
+                        <span className="ml-2 text-sm text-stone-500">
+                          on {dayNamesLong[assignment.dayOfWeek]}
+                        </span>
+                      )}
                   </div>
                   <button
                     onClick={() => deleteAssignment(assignment.id)}

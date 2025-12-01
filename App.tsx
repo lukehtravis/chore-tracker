@@ -585,8 +585,7 @@ function RecordChoreModal({
       if (isPayment) {
         let pool = minutesDone;
         for (const debt of openDebtsBetween) {
-          const remaining =
-            debt.remainingMinutes ?? debt.originalMinutes ?? 0;
+          const remaining = debt.remainingMinutes ?? debt.originalMinutes ?? 0;
           if (remaining <= 0 || pool <= 0) continue;
           const apply = Math.min(pool, remaining);
           if (apply <= 0) continue;
@@ -710,7 +709,7 @@ function RecordChoreModal({
               htmlFor="partial-checkbox"
               className="text-sm font-medium text-stone-700"
             >
-              Partial
+              Partial (If you are recording only part of a chore being done)
             </label>
           </div>
 
@@ -756,13 +755,9 @@ function RecordChoreModal({
             {isCrossPerson && isPayment && (
               <p className="mt-1 text-xs text-stone-500">
                 There are existing open debts where{" "}
-                {
-                  people.find((p) => p.id === selectedPerson)?.name
-                }{" "}
-                owes{" "}
+                {people.find((p) => p.id === selectedPerson)?.name} owes{" "}
                 {people.find((p) => p.id === forPersonId)?.name}. This
-                completion will automatically pay down the oldest debts
-                first.
+                completion will automatically pay down the oldest debts first.
               </p>
             )}
           </div>
@@ -780,8 +775,7 @@ function RecordChoreModal({
                 className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
               />
               <p className="mt-1 text-xs text-stone-500">
-                This is when the person you did this for should pay you
-                back.
+                This is when the person you did this for should pay you back.
               </p>
             </div>
           )}
@@ -924,13 +918,14 @@ function AnalysisView({
   };
 
   const getDebtStatus = (debt) => {
-    const remaining =
-      debt.remainingMinutes ?? debt.originalMinutes ?? 0;
+    const remaining = debt.remainingMinutes ?? debt.originalMinutes ?? 0;
     if (remaining <= 0) return "paid";
     if (debt.dueDate) {
       const today = new Date();
       const due = new Date(debt.dueDate);
-      if (due < new Date(today.getFullYear(), today.getMonth(), today.getDate())) {
+      if (
+        due < new Date(today.getFullYear(), today.getMonth(), today.getDate())
+      ) {
         return "overdue";
       }
     }
@@ -1492,14 +1487,12 @@ function AnalysisView({
 
                   const totalOwe = owedBy.reduce(
                     (sum, d) =>
-                      sum +
-                      (d.remainingMinutes ?? d.originalMinutes ?? 0),
+                      sum + (d.remainingMinutes ?? d.originalMinutes ?? 0),
                     0
                   );
                   const totalOwed = owedTo.reduce(
                     (sum, d) =>
-                      sum +
-                      (d.remainingMinutes ?? d.originalMinutes ?? 0),
+                      sum + (d.remainingMinutes ?? d.originalMinutes ?? 0),
                     0
                   );
 
@@ -1544,9 +1537,7 @@ function AnalysisView({
                                 (c) => c.id === d.choreId
                               );
                               const remaining =
-                                d.remainingMinutes ??
-                                d.originalMinutes ??
-                                0;
+                                d.remainingMinutes ?? d.originalMinutes ?? 0;
                               const status = getDebtStatus(d);
                               return (
                                 <div
@@ -1556,18 +1547,11 @@ function AnalysisView({
                                   <div>
                                     <p className="text-sm font-medium text-stone-800">
                                       {debtor?.name}{" "}
-                                      {chore
-                                        ? `(${chore.name})`
-                                        : ""}
+                                      {chore ? `(${chore.name})` : ""}
                                     </p>
                                     <p className="text-xs text-stone-500">
                                       Remaining {remaining} min
-                                      {d.dueDate && (
-                                        <>
-                                          {" "}
-                                          • due {d.dueDate}
-                                        </>
-                                      )}
+                                      {d.dueDate && <> • due {d.dueDate}</>}
                                     </p>
                                   </div>
                                   <span
@@ -1606,9 +1590,7 @@ function AnalysisView({
                                 (c) => c.id === d.choreId
                               );
                               const remaining =
-                                d.remainingMinutes ??
-                                d.originalMinutes ??
-                                0;
+                                d.remainingMinutes ?? d.originalMinutes ?? 0;
                               const status = getDebtStatus(d);
                               return (
                                 <div
@@ -1618,18 +1600,11 @@ function AnalysisView({
                                   <div>
                                     <p className="text-sm font-medium text-stone-800">
                                       {creditor?.name}{" "}
-                                      {chore
-                                        ? `(${chore.name})`
-                                        : ""}
+                                      {chore ? `(${chore.name})` : ""}
                                     </p>
                                     <p className="text-xs text-stone-500">
                                       Remaining {remaining} min
-                                      {d.dueDate && (
-                                        <>
-                                          {" "}
-                                          • due {d.dueDate}
-                                        </>
-                                      )}
+                                      {d.dueDate && <> • due {d.dueDate}</>}
                                     </p>
                                   </div>
                                   <span
@@ -1660,9 +1635,9 @@ function AnalysisView({
             )}
           </div>
           <p className="text-xs text-stone-500">
-            Debts are created when someone does a chore for someone else,
-            and are paid down automatically (oldest-first) when the debtor
-            later does chores for the creditor.
+            Debts are created when someone does a chore for someone else, and
+            are paid down automatically (oldest-first) when the debtor later
+            does chores for the creditor.
           </p>
         </div>
       )}

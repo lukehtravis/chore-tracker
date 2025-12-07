@@ -187,7 +187,7 @@ export default function App() {
             <nav className="flex gap-2 p-1 bg-stone-100 rounded-xl">
               {[
                 { id: "calendar", label: "Calendar", icon: "📅" },
-                { id: "analysis", label: "Analysis", icon: "📊" },
+                { id: "analysis", label: "Records", icon: "📊" },
                 { id: "admin", label: "Admin", icon: "⚙️" },
               ].map((item) => (
                 <button

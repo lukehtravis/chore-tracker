@@ -931,14 +931,46 @@ function AnalysisView({
     const choreBreakdown = {};
 
     // Calculate expected minutes from assignments
-    personAssignments.forEach((assignment) => {
-      const chore = chores.find((c) => c.id === assignment.choreId);
-      if (chore) {
-        const monthMultiplier = monthFilter ? 1 : getMonthsSinceStart();
-        expectedMinutes +=
-          chore.minutes * assignment.timesPerMonth * monthMultiplier;
+    if (monthFilter) {
+      // For a specific month, use multiplier of 1
+      personAssignments.forEach((assignment) => {
+        const chore = chores.find((c) => c.id === assignment.choreId);
+        if (chore) {
+          expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+        }
+      });
+    } else {
+      // For all-time, calculate expected minutes based on the actual months
+      // where this person has completions. This matches how the history view
+      // calculates totals by summing individual months.
+      if (personCompletions.length === 0) {
+        // No completions yet, default to 1 month
+        personAssignments.forEach((assignment) => {
+          const chore = chores.find((c) => c.id === assignment.choreId);
+          if (chore) {
+            expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+          }
+        });
+      } else {
+        // Count distinct months where this person has completions
+        const monthsWithCompletions = new Set();
+        personCompletions.forEach((completion) => {
+          // Extract month key from date (format: "YYYY-MM-DD")
+          const monthKey = completion.date.substring(0, 7); // "YYYY-MM"
+          monthsWithCompletions.add(monthKey);
+        });
+
+        const monthsToCount = monthsWithCompletions.size;
+
+        personAssignments.forEach((assignment) => {
+          const chore = chores.find((c) => c.id === assignment.choreId);
+          if (chore) {
+            expectedMinutes +=
+              chore.minutes * assignment.timesPerMonth * monthsToCount;
+          }
+        });
       }
-    });
+    }
 
     // Calculate completed minutes
     personCompletions.forEach((completion) => {
@@ -956,19 +988,6 @@ function AnalysisView({
         : 0;
 
     return { expectedMinutes, completedMinutes, percentage, choreBreakdown };
-  };
-
-  const getMonthsSinceStart = () => {
-    if (completions.length === 0) return 1;
-    const dates = completions.map((c) => new Date(c.date));
-    const earliest = new Date(Math.min(...dates));
-    const now = new Date();
-    return Math.max(
-      1,
-      (now.getFullYear() - earliest.getFullYear()) * 12 +
-        (now.getMonth() - earliest.getMonth()) +
-        1
-    );
   };
 
   const getDebtStatus = (debt) => {

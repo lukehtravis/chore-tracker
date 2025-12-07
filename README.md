@@ -2,6 +2,11 @@
 
 A chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions. This application provides a calendar-based interface for recording chore completions, tracks individual and household performance metrics, and models chore debts as first-class records when someone does a chore for someone else.
 
+**Key Feature: Credit Assignment System**
+- When someone does a chore for another person, the **credit goes to the person the chore was done FOR**, not the person who did it
+- Credits are "provisional" until the debt is paid or expires
+- Expired debts trigger retroactive stats adjustment
+
 ## Original Requirements
 
 The application was built to fulfill the following requirements:
@@ -22,12 +27,20 @@ The application was built to fulfill the following requirements:
 ## Features
 
 - **Calendar View**: Visual calendar showing completed chores with color-coded dots for each person
+  - Credits are assigned to the person the chore was done FOR (not the doer)
+  - Provisional credits are visually indicated with dashed borders
 - **Analysis Dashboard**:
   - Individual performance tracking with monthly breakdowns
+  - **Adjusted Stats**: Toggle to view stats excluding expired debt credits
   - House-wide totals and progress
   - Historical data across multiple months (3, 6, or 12 month views)
   - Debt tracking (who owes whom chores, with per-debt detail and progress)
+  - Expired debt indicators and expiration status
   - Chore completion status tracking
+- **Credit Assignment System**:
+  - Cross-person completions credit the recipient (not the doer)
+  - Provisional credits until debts are paid or expire
+  - Automatic retroactive stats adjustment when debts expire
 - **Admin Panel**: Manage people, chores, and assignments
 - **Day-Specific Chores**: Optional day-of-week assignments for recurring weekly chores
 
@@ -132,13 +145,22 @@ interface Completion {
   minutes: number;      // Minutes recorded for this completion (full or partial)
   createdAt: string;    // ISO timestamp of when the record was created
   forPersonId: string | null; // Reference to person.id this chore was done for (can be same as completedBy)
+  isProvisional?: boolean;    // true if this completion created a debt that hasn't been paid/expired
+  sourceDebtId?: string;      // If this completion created a debt, reference it
 }
 ```
+
+**Key Behaviors:**
+
+- **Credit Assignment**: Credits go to `forPersonId` (not `completedBy`) for cross-person completions. This means when Person A does a chore for Person B, Person B gets the credit toward their stats.
+- **Provisional Credits**: When a cross-person completion creates a new debt, the credit is marked as "provisional" until the debt is paid or expires.
+- **Self-Completions**: If `forPersonId === completedBy`, credit goes to `completedBy` (normal behavior).
 
 **Operations:**
 
 - Create: Record completion via calendar day click
 - Read: Real-time listener syncs all completions
+- Update: `isProvisional` is set to `false` when the associated debt is fully paid
 - Delete: Not currently implemented in UI (would require manual Firestore deletion)
 
 #### 5. `debts` Collection
@@ -156,14 +178,24 @@ interface Debt {
   createdAt: string;        // ISO timestamp when the debt was created
   dueDate: string | null;   // Due date (YYYY-MM-DD) for paying back the favor
   sourceCompletionId: string; // ID of completion that created this debt
+  expiredAt?: string;       // ISO timestamp when debt expired (set when dueDate passes and not fully paid)
+  feeCalculated: boolean;   // true if fees have been calculated for this expired debt (for future use)
 }
 ```
+
+**Key Behaviors:**
+
+- **Expiration**: A debt expires when `dueDate < today` AND `remainingMinutes > 0`. The system automatically detects and marks expired debts.
+- **Payment**: When a debt is fully paid (`remainingMinutes <= 0`), the source completion's `isProvisional` is set to `false`, making the credit permanent.
 
 **Operations:**
 
 - Create: When a cross-person completion is recorded and there are no existing debts from debtor to creditor
 - Read: Real-time listener syncs all debts
-- Update: `remainingMinutes` is reduced automatically as payments are applied
+- Update: 
+  - `remainingMinutes` is reduced automatically as payments are applied
+  - `expiredAt` is set automatically when debt expires
+  - `feeCalculated` is set when fees are calculated (for future Task 2)
 
 #### 6. `debtPayments` Collection
 
@@ -219,10 +251,18 @@ For a given person and time period:
 
 ```typescript
 completedMinutes = sum(
-  for each completion where completedBy === person.id:
+  for each completion where:
+    // Self-completion: credit goes to completedBy
+    (completion.forPersonId === completion.completedBy || !completion.forPersonId) 
+      && completion.completedBy === person.id
+    OR
+    // Cross-person completion: credit goes to forPersonId
+    completion.forPersonId === person.id:
     completion.minutes
 )
 ```
+
+**Key Change:** Credits are assigned based on `forPersonId`, not `completedBy`. This means when Person A does a chore for Person B, Person B gets the credit toward their completion stats.
 
 Filtered by date range if calculating for a specific month.
 
@@ -234,6 +274,20 @@ percentage = expectedMinutes > 0
   : 0
 ```
 
+### Credit Assignment & Provisional Credits
+
+**Core Principle:** Credits go to the person the chore was done FOR (`forPersonId`), not the person who did it (`completedBy`). This ensures that when someone does a favor for another person, the credit counts toward the recipient's obligations.
+
+1. **Self-Completions** (`forPersonId === completedBy`):
+   - Credit goes to `completedBy`
+   - No debt is created
+   - Credit is permanent (not provisional)
+
+2. **Cross-Person Completions** (`forPersonId !== completedBy`):
+   - Credit goes to `forPersonId` (the person the chore was done for)
+   - Credit is **provisional** until the debt is paid or expires
+   - Completion is marked with `isProvisional: true` and `sourceDebtId` when a new debt is created
+
 ### Debt Calculation
 
 Debts are tracked as explicit `Debt` documents and are based on **who a chore was done for**, not inferred automatically from assignments.
@@ -244,16 +298,18 @@ Debts are tracked as explicit `Debt` documents and are based on **who a chore wa
      - **Who it was done for** (`forPersonId`)
    - If `forPersonId` is empty or equals `completedBy`, no debt logic is applied.
    - If `forPersonId !== completedBy`, this is treated as a favor from `completedBy` (creditor) to `forPersonId` (debtor).
+   - **Credit Assignment**: The completion counts toward `forPersonId`'s stats (not `completedBy`'s).
 
 2. **Finding existing debts (oldest-first auto payment)**:
    - For a cross-person completion where `completedBy = X` and `forPersonId = Y`, the system looks for open debts where:
      - `debtorId === X` and `creditorId === Y`
      - `remainingMinutes > 0`
    - If such debts exist, the completion is treated as a **payment**:
-     - The completion’s minutes are applied oldest-first across those debts.
+     - The completion's minutes are applied oldest-first across those debts.
      - For each application:
        - A `DebtPayment` record is created.
        - The corresponding `Debt.remainingMinutes` is reduced.
+     - When a debt is fully paid (`remainingMinutes <= 0`), the source completion's `isProvisional` is set to `false`.
 
 3. **Creating new debts**:
    - If no open debts exist from `completedBy` to `forPersonId` when recording a cross-person completion, a **new `Debt` document** is created:
@@ -261,12 +317,31 @@ Debts are tracked as explicit `Debt` documents and are based on **who a chore wa
      - `debtorId = forPersonId`
      - `originalMinutes = remainingMinutes = completion.minutes`
      - `dueDate` is manually selected in the UI when saving the completion.
+     - The source completion is marked with `isProvisional: true` and `sourceDebtId: debtId`.
 
-4. **Debt status**:
+4. **Debt expiration**:
+   - A debt expires when `dueDate < today` AND `remainingMinutes > 0`.
+   - When a debt expires:
+     - `expiredAt` is set to the current timestamp
+     - The provisional credit from the source completion is removed from stats calculations (retroactive adjustment)
+     - Expired debts are visually distinguished in the UI (strikethrough, grayed out)
+
+5. **Debt status**:
    - In the UI, debts are labeled based on:
      - `remainingMinutes <= 0` → **Paid**
+     - `remainingMinutes > 0` and `expiredAt` is set → **Expired**
      - `remainingMinutes > 0` and `dueDate` in the past → **Overdue**
      - Otherwise → **Open**
+
+### Retroactive Stats Adjustment
+
+When a debt expires, the system retroactively adjusts the stats for the month in which the debt was created:
+
+1. **Calculate adjusted stats**: Stats are recalculated excluding the expired debt's provisional credit
+2. **Display options**: Users can toggle between "current stats" (with provisional credits) and "adjusted stats" (without expired debt credits) in the Analysis view
+3. **Visual indicators**: Provisional credits are marked in the calendar view, and expired debts are clearly indicated in the debt display
+
+This ensures that expired debts don't permanently inflate completion percentages, while still maintaining a clear audit trail of what happened.
 
 ### Month Key Format
 
@@ -298,8 +373,12 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
    - Checkbox and selector for partial completions (optional)
    - Dropdown to select **who the chore was done for** (can be the same person)
    - If the chore is done for someone else and will create a new debt, a **due date** field is required
+   - Note indicating who will receive credit (the person the chore was done for)
 4. Click "Save" to record the completion
-5. Calendar updates in real-time with color-coded dots showing completions
+5. Calendar updates in real-time with color-coded dots showing completions:
+   - Dots are colored based on who gets credit (`forPersonId`), not who did it
+   - Provisional credits are indicated with a dashed border
+   - Tooltips show completion details including provisional status
 
 ### 3. Viewing Analysis (Analysis View)
 
@@ -307,9 +386,14 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 2. Select month using navigation arrows
 3. Choose tab:
    - **Individual**: See each person's stats for current month and all-time
+     - Toggle "Show adjusted stats" to exclude expired debt credits
+     - See both current stats (with provisional credits) and adjusted stats (without expired debts)
    - **House Total**: Aggregate statistics and chore completion status
    - **History**: Multi-month table showing trends (3, 6, or 12 months)
-   - **Debts**: Per-person view of debts owed and owed-to, with per-debt details (chore, minutes, due date, status)
+   - **Debts**: Per-person view of debts owed and owed-to, with per-debt details:
+     - Shows expiration status (expired debts are visually distinguished)
+     - Displays which completion created each debt
+     - Shows expiration dates for expired debts
 
 ## Component Architecture
 
@@ -342,6 +426,9 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - Click handler to open record modal
 - Visual indicators for today
 - Completion dots with chore names (truncated if >10 chars)
+- **Credit Assignment**: Dots are colored based on who gets credit (`forPersonId`), not who did the chore
+- **Provisional Indicators**: Provisional credits show with a dashed border
+- **Tooltips**: Show completion details including who did it and provisional status
 
 ### RecordChoreModal Component
 
@@ -384,6 +471,8 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - History table with configurable time range (3/6/12 months)
 - Debt calculation and display
 - Chore breakdown per person
+- **Adjusted Stats Toggle**: View stats with or without expired debt credits
+- **Expired Debt Indicators**: Visual distinction for expired debts in the "Who Owes Who" tab
 
 **Key Functions:**
 - `calculatePersonStats(personId, monthFilter)`: Calculates expected, completed, percentage, and breakdown

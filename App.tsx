@@ -967,7 +967,6 @@ function AnalysisView({
 }) {
   const [selectedTab, setSelectedTab] = useState("individual");
   const [historyMonths, setHistoryMonths] = useState(6);
-  const [showAdjustedStats, setShowAdjustedStats] = useState(false);
   const monthKey = getMonthKey(currentMonth);
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -1304,95 +1303,72 @@ function AnalysisView({
 
       {/* Individual Stats */}
       {selectedTab === "individual" && (
-        <div>
-          {/* Adjusted Stats Toggle */}
-          <div className="mb-4 flex items-center gap-2">
-            <input
-              id="adjusted-stats-toggle"
-              type="checkbox"
-              checked={showAdjustedStats}
-              onChange={(e) => setShowAdjustedStats(e.target.checked)}
-              className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
-            />
-            <label
-              htmlFor="adjusted-stats-toggle"
-              className="text-sm text-stone-600"
-            >
-              Show adjusted stats (excludes expired debts)
-            </label>
-          </div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {people.map((person, idx) => {
+            const monthStats = calculatePersonStats(person.id, monthKey);
+            const allTimeStats = calculatePersonStats(person.id);
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {people.map((person, idx) => {
-              const monthStats = showAdjustedStats
-                ? calculatePersonStatsWithoutExpiredDebts(person.id, monthKey)
-                : calculatePersonStats(person.id, monthKey);
-              const allTimeStats = showAdjustedStats
-                ? calculatePersonStatsWithoutExpiredDebts(person.id)
-                : calculatePersonStats(person.id);
-
-              return (
-                <div
-                  key={person.id}
-                  className={`bg-white rounded-2xl card-shadow p-6 fade-in stagger-${
-                    idx + 1
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-display text-lg font-semibold text-stone-800">
-                      {person.name}
-                    </h3>
-                    <ProgressRing percentage={monthStats.percentage} />
-                  </div>
-
-                  <div className="space-y-3">
-                    <div>
-                      <p className="text-sm text-stone-500">This Month</p>
-                      <p className="text-lg font-medium text-stone-700">
-                        {monthStats.completedMinutes} /{" "}
-                        {monthStats.expectedMinutes} min
-                      </p>
-                    </div>
-
-                    <div className="border-t border-stone-100 pt-3">
-                      <p className="text-sm text-stone-500">All Time</p>
-                      <p className="text-lg font-medium text-stone-700">
-                        {allTimeStats.completedMinutes} min (
-                        {allTimeStats.percentage}%)
-                      </p>
-                    </div>
-
-                    {Object.keys(monthStats.choreBreakdown).length > 0 && (
-                      <div className="border-t border-stone-100 pt-3">
-                        <p className="text-sm text-stone-500 mb-2">Breakdown</p>
-                        <div className="space-y-1">
-                          {Object.entries(monthStats.choreBreakdown).map(
-                            ([chore, mins]) => (
-                              <div
-                                key={chore}
-                                className="flex justify-between text-sm"
-                              >
-                                <span className="text-stone-600">{chore}</span>
-                                <span className="text-stone-800 font-medium">
-                                  {mins} min
-                                </span>
-                              </div>
-                            )
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+            return (
+              <div
+                key={person.id}
+                className={`bg-white rounded-2xl card-shadow p-6 fade-in stagger-${
+                  idx + 1
+                }`}
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-display text-lg font-semibold text-stone-800">
+                    {person.name}
+                  </h3>
+                  <ProgressRing percentage={monthStats.percentage} />
                 </div>
-              );
-            })}
 
-            {people.length === 0 && (
-              <div className="col-span-full text-center py-12 text-stone-500">
-                No people added yet. Go to Admin to add household members.
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-sm text-stone-500">This Month</p>
+                    <p className="text-lg font-medium text-stone-700">
+                      {monthStats.completedMinutes} /{" "}
+                      {monthStats.expectedMinutes} min
+                    </p>
+                  </div>
+
+                  <div className="border-t border-stone-100 pt-3">
+                    <p className="text-sm text-stone-500">All Time</p>
+                    <p className="text-lg font-medium text-stone-700">
+                      {allTimeStats.completedMinutes} min (
+                      {allTimeStats.percentage}%)
+                    </p>
+                  </div>
+
+                  {Object.keys(monthStats.choreBreakdown).length > 0 && (
+                    <div className="border-t border-stone-100 pt-3">
+                      <p className="text-sm text-stone-500 mb-2">Breakdown</p>
+                      <div className="space-y-1">
+                        {Object.entries(monthStats.choreBreakdown).map(
+                          ([chore, mins]) => (
+                            <div
+                              key={chore}
+                              className="flex justify-between text-sm"
+                            >
+                              <span className="text-stone-600">{chore}</span>
+                              <span className="text-stone-800 font-medium">
+                                {mins} min
+                              </span>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
+            );
+          })}
+
+          {people.length === 0 && (
+            <div className="col-span-full text-center py-12 text-stone-500">
+              No people added yet. Go to Admin to add household members.
+            </div>
+          )}
         </div>
       )}
 

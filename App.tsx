@@ -35,6 +35,32 @@ const getDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
 
 const getFirstDayOfMonth = (year, month) => new Date(year, month, 1).getDay();
 
+// Helper function to check and mark expired debts
+const checkAndMarkExpiredDebts = async (debts, completions, db) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  for (const debt of debts) {
+    // Skip if already expired or fully paid
+    if (debt.expiredAt || (debt.remainingMinutes ?? 0) <= 0) {
+      continue;
+    }
+
+    // Check if debt is expired
+    if (debt.dueDate) {
+      const dueDate = new Date(debt.dueDate);
+      dueDate.setHours(0, 0, 0, 0);
+
+      if (dueDate < today && (debt.remainingMinutes ?? 0) > 0) {
+        // Mark debt as expired
+        await updateDoc(doc(db, "debts", debt.id), {
+          expiredAt: new Date().toISOString(),
+        });
+      }
+    }
+  }
+};
+
 // Main App Component
 export default function App() {
   const [currentView, setCurrentView] = useState("calendar");
@@ -84,6 +110,11 @@ export default function App() {
       }
     );
 
+    // Check for expired debts when debts are loaded
+    if (debts.length > 0) {
+      checkAndMarkExpiredDebts(debts, completions, db);
+    }
+
     return () => {
       unsubPeople();
       unsubChores();
@@ -93,6 +124,13 @@ export default function App() {
       unsubDebtPayments();
     };
   }, []);
+
+  // Check for expired debts when debts change
+  useEffect(() => {
+    if (debts.length > 0) {
+      checkAndMarkExpiredDebts(debts, completions, db);
+    }
+  }, [debts, completions]);
 
   return (
     <div className="min-h-screen bg-stone-50">
@@ -456,17 +494,29 @@ function CalendarView({
                       choreName.length > 10
                         ? choreName.substring(0, 10) + "..."
                         : choreName;
+
+                    // Get the person who gets credit (forPersonId, or completedBy if same)
+                    const creditPersonId =
+                      completion.forPersonId || completion.completedBy;
+                    const creditPerson = people.find(
+                      (p) => p.id === creditPersonId
+                    );
+                    const isProvisional = completion.isProvisional;
+
                     return (
                       <div
                         key={idx}
-                        className="completion-dot px-2 py-0.5 rounded-full text-white text-xs font-medium whitespace-nowrap"
+                        className={`completion-dot px-2 py-0.5 rounded-full text-white text-xs font-medium whitespace-nowrap ${
+                          isProvisional
+                            ? "opacity-90 border border-dashed border-white/50"
+                            : ""
+                        }`}
                         style={{
-                          backgroundColor: personColors[completion.completedBy],
+                          backgroundColor: personColors[creditPersonId],
                         }}
-                        title={`${
-                          people.find((p) => p.id === completion.completedBy)
-                            ?.name
-                        }: ${chore?.name}`}
+                        title={`${creditPerson?.name}: ${chore?.name}${
+                          isProvisional ? " (provisional)" : ""
+                        }`}
                       >
                         {displayName}
                       </div>
@@ -612,7 +662,14 @@ function RecordChoreModal({
 
     const nowIso = new Date().toISOString();
 
-    await setDoc(doc(db, "completions", completionId), {
+    // Determine if this will create a new debt (needed for isProvisional)
+    let debtIdForCompletion = undefined;
+    if (isNewDebt) {
+      debtIdForCompletion = generateId();
+    }
+
+    // Build completion object - only include optional fields if they have values
+    const completionData = {
       id: completionId,
       date,
       completedBy: selectedPerson,
@@ -622,7 +679,16 @@ function RecordChoreModal({
       // Who this chore was done for; can be the same as selectedPerson
       // If not explicitly chosen, default to the person who did the chore
       forPersonId: forPersonId || selectedPerson,
-    });
+      // Only add provisional fields if creating a new debt (Firebase doesn't allow undefined)
+      ...(isNewDebt && debtIdForCompletion
+        ? {
+            isProvisional: true,
+            sourceDebtId: debtIdForCompletion,
+          }
+        : {}),
+    };
+
+    await setDoc(doc(db, "completions", completionId), completionData);
 
     // Debt logic:
     // - If the chore was done for another person (forPersonId !== selectedPerson),
@@ -648,16 +714,30 @@ function RecordChoreModal({
             createdAt: nowIso,
           });
 
+          const newRemaining = remaining - apply;
           await updateDoc(doc(db, "debts", debt.id), {
-            remainingMinutes: remaining - apply,
+            remainingMinutes: newRemaining,
           });
+
+          // If debt is fully paid, mark source completion as permanent
+          if (newRemaining <= 0) {
+            const sourceCompletion = completions.find(
+              (c) => c.id === debt.sourceCompletionId
+            );
+            if (sourceCompletion && sourceCompletion.isProvisional) {
+              await updateDoc(doc(db, "completions", sourceCompletion.id), {
+                isProvisional: false,
+              });
+            }
+          }
 
           pool -= apply;
           if (pool <= 0) break;
         }
       } else if (isNewDebt) {
-        const debtId = generateId();
-        await setDoc(doc(db, "debts", debtId), {
+        const debtId = debtIdForCompletion || generateId();
+        // Build debt object - only include optional fields if they have values
+        const debtData = {
           id: debtId,
           creditorId: selectedPerson,
           debtorId: forPersonId,
@@ -668,7 +748,12 @@ function RecordChoreModal({
           // Store the date string directly; we can interpret it as needed in the UI
           dueDate: dueDate || null,
           sourceCompletionId: completionId,
-        });
+          // NEW FIELDS: Track expiration and fee calculation status
+          feeCalculated: false,
+        };
+        // Only add expiredAt if it has a value (it won't initially)
+        // This field will be set later when the debt expires
+        await setDoc(doc(db, "debts", debtId), debtData);
       }
     }
 
@@ -802,12 +887,21 @@ function RecordChoreModal({
                     </option>
                   ))}
               </select>
-              {isCrossPerson && isPayment && (
+              {isCrossPerson && (
                 <p className="mt-1 text-xs text-stone-500">
-                  There are existing open debts where{" "}
-                  {people.find((p) => p.id === selectedPerson)?.name} owes{" "}
-                  {people.find((p) => p.id === forPersonId)?.name}. This
-                  completion will automatically pay down the oldest debts first.
+                  This will credit{" "}
+                  {people.find((p) => p.id === forPersonId)?.name ||
+                    "this person"}
+                  's stats{isNewDebt ? " (provisional until debt is paid)" : ""}
+                  {isPayment && (
+                    <>
+                      . There are existing open debts where{" "}
+                      {people.find((p) => p.id === selectedPerson)?.name} owes{" "}
+                      {people.find((p) => p.id === forPersonId)?.name}. This
+                      completion will automatically pay down the oldest debts
+                      first.
+                    </>
+                  )}
                 </p>
               )}
             </div>
@@ -873,6 +967,7 @@ function AnalysisView({
 }) {
   const [selectedTab, setSelectedTab] = useState("individual");
   const [historyMonths, setHistoryMonths] = useState(6);
+  const [showAdjustedStats, setShowAdjustedStats] = useState(false);
   const monthKey = getMonthKey(currentMonth);
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -912,6 +1007,108 @@ function AnalysisView({
     return months;
   };
 
+  // Helper function to calculate stats without expired debt credits
+  const calculatePersonStatsWithoutExpiredDebts = (
+    personId,
+    monthFilter: string | null = null
+  ) => {
+    // Get expired debt IDs
+    const expiredDebtIds = new Set(
+      debts
+        .filter((d) => d.expiredAt && (d.remainingMinutes ?? 0) > 0)
+        .map((d) => d.id)
+    );
+
+    // Filter out completions from expired debts
+    const filteredCompletions = completions.filter((c) => {
+      // Apply month filter
+      if (monthFilter && !c.date.startsWith(monthFilter)) {
+        return false;
+      }
+
+      // Check if this completion is from an expired debt
+      if (
+        c.isProvisional &&
+        c.sourceDebtId &&
+        expiredDebtIds.has(c.sourceDebtId)
+      ) {
+        return false; // Exclude this completion
+      }
+
+      return true;
+    });
+
+    // Now calculate stats using filtered completions
+    const personAssignments = assignments.filter(
+      (a) => a.personId === personId
+    );
+
+    const personCompletions = filteredCompletions.filter((c) => {
+      // Self-completion: credit goes to completedBy
+      if (c.forPersonId === c.completedBy || !c.forPersonId) {
+        return c.completedBy === personId;
+      }
+      // Cross-person completion: credit goes to forPersonId
+      return c.forPersonId === personId;
+    });
+
+    let expectedMinutes = 0;
+    let completedMinutes = 0;
+    const choreBreakdown = {};
+
+    // Calculate expected minutes from assignments
+    if (monthFilter) {
+      personAssignments.forEach((assignment) => {
+        const chore = chores.find((c) => c.id === assignment.choreId);
+        if (chore) {
+          expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+        }
+      });
+    } else {
+      if (personCompletions.length === 0) {
+        personAssignments.forEach((assignment) => {
+          const chore = chores.find((c) => c.id === assignment.choreId);
+          if (chore) {
+            expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+          }
+        });
+      } else {
+        const monthsWithCompletions = new Set();
+        personCompletions.forEach((completion) => {
+          const monthKey = completion.date.substring(0, 7);
+          monthsWithCompletions.add(monthKey);
+        });
+
+        const monthsToCount = monthsWithCompletions.size;
+
+        personAssignments.forEach((assignment) => {
+          const chore = chores.find((c) => c.id === assignment.choreId);
+          if (chore) {
+            expectedMinutes +=
+              chore.minutes * assignment.timesPerMonth * monthsToCount;
+          }
+        });
+      }
+    }
+
+    // Calculate completed minutes
+    personCompletions.forEach((completion) => {
+      const chore = chores.find((c) => c.id === completion.choreId);
+      if (chore) {
+        completedMinutes += completion.minutes;
+        choreBreakdown[chore.name] =
+          (choreBreakdown[chore.name] || 0) + completion.minutes;
+      }
+    });
+
+    const percentage =
+      expectedMinutes > 0
+        ? Math.round((completedMinutes / expectedMinutes) * 100)
+        : 0;
+
+    return { expectedMinutes, completedMinutes, percentage, choreBreakdown };
+  };
+
   // Calculate stats for each person
   const calculatePersonStats = (
     personId,
@@ -920,11 +1117,21 @@ function AnalysisView({
     const personAssignments = assignments.filter(
       (a) => a.personId === personId
     );
-    const personCompletions = completions.filter(
-      (c) =>
-        c.completedBy === personId &&
-        (monthFilter ? c.date.startsWith(monthFilter) : true)
-    );
+    // NEW LOGIC: Credit assignment uses forPersonId for cross-person completions
+    const personCompletions = completions.filter((c) => {
+      // Apply month filter first
+      if (monthFilter && !c.date.startsWith(monthFilter)) {
+        return false;
+      }
+
+      // Self-completion: credit goes to completedBy
+      if (c.forPersonId === c.completedBy || !c.forPersonId) {
+        return c.completedBy === personId;
+      }
+
+      // Cross-person completion: credit goes to forPersonId
+      return c.forPersonId === personId;
+    });
 
     let expectedMinutes = 0;
     let completedMinutes = 0;
@@ -1097,72 +1304,95 @@ function AnalysisView({
 
       {/* Individual Stats */}
       {selectedTab === "individual" && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {people.map((person, idx) => {
-            const monthStats = calculatePersonStats(person.id, monthKey);
-            const allTimeStats = calculatePersonStats(person.id);
+        <div>
+          {/* Adjusted Stats Toggle */}
+          <div className="mb-4 flex items-center gap-2">
+            <input
+              id="adjusted-stats-toggle"
+              type="checkbox"
+              checked={showAdjustedStats}
+              onChange={(e) => setShowAdjustedStats(e.target.checked)}
+              className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
+            />
+            <label
+              htmlFor="adjusted-stats-toggle"
+              className="text-sm text-stone-600"
+            >
+              Show adjusted stats (excludes expired debts)
+            </label>
+          </div>
 
-            return (
-              <div
-                key={person.id}
-                className={`bg-white rounded-2xl card-shadow p-6 fade-in stagger-${
-                  idx + 1
-                }`}
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-display text-lg font-semibold text-stone-800">
-                    {person.name}
-                  </h3>
-                  <ProgressRing percentage={monthStats.percentage} />
-                </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {people.map((person, idx) => {
+              const monthStats = showAdjustedStats
+                ? calculatePersonStatsWithoutExpiredDebts(person.id, monthKey)
+                : calculatePersonStats(person.id, monthKey);
+              const allTimeStats = showAdjustedStats
+                ? calculatePersonStatsWithoutExpiredDebts(person.id)
+                : calculatePersonStats(person.id);
 
-                <div className="space-y-3">
-                  <div>
-                    <p className="text-sm text-stone-500">This Month</p>
-                    <p className="text-lg font-medium text-stone-700">
-                      {monthStats.completedMinutes} /{" "}
-                      {monthStats.expectedMinutes} min
-                    </p>
+              return (
+                <div
+                  key={person.id}
+                  className={`bg-white rounded-2xl card-shadow p-6 fade-in stagger-${
+                    idx + 1
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-display text-lg font-semibold text-stone-800">
+                      {person.name}
+                    </h3>
+                    <ProgressRing percentage={monthStats.percentage} />
                   </div>
 
-                  <div className="border-t border-stone-100 pt-3">
-                    <p className="text-sm text-stone-500">All Time</p>
-                    <p className="text-lg font-medium text-stone-700">
-                      {allTimeStats.completedMinutes} min (
-                      {allTimeStats.percentage}%)
-                    </p>
-                  </div>
-
-                  {Object.keys(monthStats.choreBreakdown).length > 0 && (
-                    <div className="border-t border-stone-100 pt-3">
-                      <p className="text-sm text-stone-500 mb-2">Breakdown</p>
-                      <div className="space-y-1">
-                        {Object.entries(monthStats.choreBreakdown).map(
-                          ([chore, mins]) => (
-                            <div
-                              key={chore}
-                              className="flex justify-between text-sm"
-                            >
-                              <span className="text-stone-600">{chore}</span>
-                              <span className="text-stone-800 font-medium">
-                                {mins} min
-                              </span>
-                            </div>
-                          )
-                        )}
-                      </div>
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-sm text-stone-500">This Month</p>
+                      <p className="text-lg font-medium text-stone-700">
+                        {monthStats.completedMinutes} /{" "}
+                        {monthStats.expectedMinutes} min
+                      </p>
                     </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
 
-          {people.length === 0 && (
-            <div className="col-span-full text-center py-12 text-stone-500">
-              No people added yet. Go to Admin to add household members.
-            </div>
-          )}
+                    <div className="border-t border-stone-100 pt-3">
+                      <p className="text-sm text-stone-500">All Time</p>
+                      <p className="text-lg font-medium text-stone-700">
+                        {allTimeStats.completedMinutes} min (
+                        {allTimeStats.percentage}%)
+                      </p>
+                    </div>
+
+                    {Object.keys(monthStats.choreBreakdown).length > 0 && (
+                      <div className="border-t border-stone-100 pt-3">
+                        <p className="text-sm text-stone-500 mb-2">Breakdown</p>
+                        <div className="space-y-1">
+                          {Object.entries(monthStats.choreBreakdown).map(
+                            ([chore, mins]) => (
+                              <div
+                                key={chore}
+                                className="flex justify-between text-sm"
+                              >
+                                <span className="text-stone-600">{chore}</span>
+                                <span className="text-stone-800 font-medium">
+                                  {mins} min
+                                </span>
+                              </div>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {people.length === 0 && (
+              <div className="col-span-full text-center py-12 text-stone-500">
+                No people added yet. Go to Admin to add household members.
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1665,19 +1895,36 @@ function AnalysisView({
                               const remaining =
                                 d.remainingMinutes ?? d.originalMinutes ?? 0;
                               const status = getDebtStatus(d);
+                              const isExpired = !!d.expiredAt;
                               return (
                                 <div
                                   key={d.id}
-                                  className="flex items-center justify-between rounded-xl bg-white px-3 py-2"
+                                  className={`flex items-center justify-between rounded-xl bg-white px-3 py-2 ${
+                                    isExpired ? "opacity-60 line-through" : ""
+                                  }`}
                                 >
                                   <div>
                                     <p className="text-sm font-medium text-stone-800">
                                       {creditor?.name}{" "}
                                       {chore ? `(${chore.name})` : ""}
+                                      {isExpired && (
+                                        <span className="ml-2 text-xs text-stone-500">
+                                          (Expired)
+                                        </span>
+                                      )}
                                     </p>
                                     <p className="text-xs text-stone-500">
                                       Remaining {remaining} min
                                       {d.dueDate && <> • due {d.dueDate}</>}
+                                      {d.expiredAt && (
+                                        <>
+                                          {" "}
+                                          • expired{" "}
+                                          {new Date(
+                                            d.expiredAt
+                                          ).toLocaleDateString()}
+                                        </>
+                                      )}
                                     </p>
                                   </div>
                                   <span

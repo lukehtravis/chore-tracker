@@ -323,7 +323,8 @@ function CalendarView({
       "#fca311",
     ];
     return people.reduce((acc, person, i) => {
-      acc[person.id] = colors[i % colors.length];
+      // Use custom color if person has one, otherwise fall back to default array
+      acc[person.id] = person.color || colors[i % colors.length];
       return acc;
     }, {});
   };

@@ -2409,12 +2409,9 @@ function AnalysisView({
                                 </span>
                               </td>
                               <td className="p-4 text-center">
-                                <button
-                                  onClick={() => calculateMonthlyFees(monthKey)}
-                                  className="text-xs text-stone-600 hover:text-stone-800 underline"
-                                >
-                                  Calculate
-                                </button>
+                                <span className="text-xs text-stone-400">
+                                  —
+                                </span>
                               </td>
                             </tr>
                           );

@@ -37,12 +37,23 @@ The application was built to fulfill the following requirements:
   - Debt tracking (who owes whom chores, with per-debt detail and progress)
   - Expired debt indicators and expiration status
   - Chore completion status tracking
+  - **Fees/Credits Tracking**: Monthly fee and credit calculations based on completion percentages
+    - Base fees/credits calculated from monthly completion percentages
+    - Expired debt fees calculated retroactively when debts expire
+    - Running tally of all fees/credits per person
+    - Mark fees as processed after rent calculation
 - **Credit Assignment System**:
   - Cross-person completions credit the recipient (not the doer)
   - Provisional credits until debts are paid or expire
   - Automatic retroactive stats adjustment when debts expire
 - **Admin Panel**: Manage people, chores, and assignments
+  - **Fee Settings**: Configure reward thresholds, reward amounts, and penalty modifiers
 - **Day-Specific Chores**: Optional day-of-week assignments for recurring weekly chores
+- **Fees & Credits System**: Automated calculation of monthly fees and credits
+  - Rewards for high completion percentages (default: 90%+ = $20 credit)
+  - Penalties for low completion percentages (default: $1 per percentage point below 100%)
+  - Retroactive fee adjustments when debts expire
+  - Monthly fee tracking for rent calculation
 
 ## Architecture
 
@@ -68,7 +79,7 @@ All data is stored in Firebase Firestore and synchronized in real-time using `on
 
 ### Firebase Collections
 
-The application uses six Firestore collections:
+The application uses eight Firestore collections:
 
 #### 1. `people` Collection
 
@@ -216,6 +227,60 @@ interface DebtPayment {
 - Create: When a cross-person completion is recorded and there are existing debts from debtor to creditor
 - Read: (Optional) for audit/history views or debugging
 
+#### 7. `feeSettings` Collection (Singleton)
+
+Stores global fee and credit configuration settings.
+
+```typescript
+interface FeeSettings {
+  id: "settings";           // Always this ID (singleton)
+  rewardThreshold: number;  // Completion % to get reward (default: 90)
+  rewardAmount: number;     // Dollar amount of reward (default: 20)
+  penaltyModifier: number;  // Multiplier for penalty calculation (default: 1.0)
+  lastUpdated: string;      // ISO timestamp
+}
+```
+
+**Operations:**
+
+- Read: Load once on app start, real-time listener syncs changes
+- Update: Admin can modify in Admin panel (Fee Settings tab)
+- Initialize: If no document exists, defaults are used (90% threshold, $20 reward, 1.0 modifier)
+
+#### 8. `monthlyFees` Collection
+
+Tracks fees and credits per person per month for rent calculation.
+
+```typescript
+interface MonthlyFee {
+  id: string;                // Unique identifier (generated)
+  personId: string;          // Reference to person.id
+  monthKey: string;          // "YYYY-MM" format
+  baseFee: number;           // Fee from completion % (can be negative for credits)
+  expiredDebtFees: number;   // Additional fees from expired debts
+  totalFee: number;          // baseFee + expiredDebtFees (for convenience)
+  calculatedAt: string;      // ISO timestamp when this was calculated
+  processed: boolean;        // true when rent has been calculated and this can be hidden
+}
+```
+
+**Key Behaviors:**
+
+- **Base Fee**: Calculated from monthly completion percentage using fee formula
+- **Expired Debt Fees**: Accumulated retroactive fees when debts expire
+- **Processing Status**: `processed: true` marks fees as applied to rent (for treasurer workflow)
+- **Historical Preservation**: All records are kept for running tallies, never deleted
+
+**Operations:**
+
+- Create: When calculating fees for a month (via "Recalculate" button or auto-processing)
+- Read: Real-time listener syncs all monthly fees
+- Update: 
+  - Recalculated when "Recalculate" button is clicked
+  - `processed` flag updated when treasurer marks as processed
+  - `expiredDebtFees` updated when debts expire
+- Never delete: Keep all records for historical running tally
+
 ### Data Relationships
 
 ```text
@@ -343,6 +408,119 @@ When a debt expires, the system retroactively adjusts the stats for the month in
 
 This ensures that expired debts don't permanently inflate completion percentages, while still maintaining a clear audit trail of what happened.
 
+### Fees & Credits System
+
+The application includes an automated fee and credit tracking system that calculates monthly fees/credits based on completion percentages and handles retroactive adjustments when debts expire.
+
+#### Fee Settings Configuration
+
+Fee settings are stored as a singleton document in the `feeSettings` collection and can be configured in the Admin panel:
+
+- **Reward Threshold**: Completion percentage required to earn a reward (default: 90%)
+- **Reward Amount**: Dollar amount of credit for meeting threshold (default: $20)
+- **Penalty Modifier**: Multiplier for penalty calculation (default: 1.0)
+
+#### Base Fee Calculation
+
+Base fees are calculated monthly for each person based on their completion percentage:
+
+```typescript
+if (completionPercentage >= rewardThreshold) {
+  baseFee = -rewardAmount; // Negative = credit
+} else {
+  baseFee = (100 - completionPercentage) * penaltyModifier;
+}
+```
+
+**Examples:**
+- 95% completion, threshold 90%, reward $20: `-$20` (credit)
+- 80% completion, modifier 1.0: `(100 - 80) * 1.0 = $20` (fee)
+- 80% completion, modifier 1.5: `(100 - 80) * 1.5 = $30` (fee)
+- 50% completion, modifier 1.0: `(100 - 50) * 1.0 = $50` (fee)
+
+**Important:** Base fees are calculated using stats that **exclude expired debt credits** (`calculatePersonStatsWithoutExpiredDebts`). This ensures consistency with the "Individual" tab's adjusted stats display.
+
+#### Expired Debt Fee Calculation
+
+When a debt expires (not fully paid by its due date), the system calculates a retroactive fee adjustment:
+
+1. **Identify Expired Debt**: Debt must have `expiredAt` set, `remainingMinutes > 0`, and `feeCalculated: false`
+2. **Find Original Completion**: Locate the completion that created the debt (`sourceCompletionId`)
+3. **Get Completion Month**: Extract month key from completion date
+4. **Calculate Stats Without Debt**: Calculate what the debtor's stats would have been in the original month WITHOUT this debt's credit (excluding all debts that expired BEFORE this one)
+5. **Calculate Stats With Debt**: Calculate what the debtor's stats were WITH this debt's credit (excluding debts that expired before this one)
+6. **Calculate Fee Delta**: 
+   - `feeWithout = calculateBaseFee(statsWithout.percentage)`
+   - `feeWith = calculateBaseFee(statsWith.percentage)`
+   - `delta = feeWithout - feeWith`
+7. **Allocate to Target Month**: Add delta to the **expiration month's** `expiredDebtFees` (not the month after)
+8. **Mark as Calculated**: Set debt's `feeCalculated: true` to prevent double-calculation
+
+**Key Principle:** Each debt expiration is handled independently. When calculating retroactive stats for a debt, we exclude:
+- This debt's credit (since it expired)
+- All other debts that expired BEFORE this one (since their credits were already removed)
+- But we include debts that haven't expired yet (or expired after this one)
+
+**Example:**
+- Nov 15: Person A does chore for Person B (100 min)
+- Person B's Nov stats: 85% completion (with credit)
+- Person B's Nov stats without this credit: 75% completion
+- Fee with credit: `(100 - 85) * 1.0 = $15`
+- Fee without credit: `(100 - 75) * 1.0 = $25`
+- Delta: `$25 - $15 = $10`
+- Dec 10: Debt expires (not fully paid)
+- Person B's Dec `expiredDebtFees`: `+$10`
+- Person B's Nov stats retroactively adjusted to 75% (for display purposes)
+
+**Timing:** Expired debt fees are allocated to the **expiration month** (not the month after). This ensures all December fees (base + expired debt) contribute to January's rent calculation, maintaining consistency with the rent calculation timeline.
+
+#### Monthly Fee Processing Workflow
+
+1. **Automatic Processing**: When viewing the "Fees/Credits" tab, the system automatically processes any unprocessed expired debts
+2. **Manual Calculation**: Click "Recalculate" button to:
+   - Process any unprocessed expired debts
+   - Recalculate base fees for all people for the selected month
+   - Update or create `monthlyFees` records
+   - Preserve `processed` status on existing records
+3. **Processing Status**: After rent is calculated, treasurer can mark fees as "Processed" using the "Mark Processed" button
+4. **Running Tally**: The system maintains a running total of all fees/credits per person across all months
+
+#### Total Fee Calculation
+
+For each person per month:
+
+```typescript
+totalFee = baseFee + expiredDebtFees
+```
+
+Where:
+- `baseFee`: Calculated from completion percentage (excluding expired debt credits)
+- `expiredDebtFees`: Sum of all retroactive fee adjustments from debts that expired in this month
+
+**Note:** Credits are negative values, fees are positive. Example: `-$20 (credit) + $10 (expired debt) = -$10` (still a credit, but smaller).
+
+#### UI Components
+
+**Fees/Credits Tab (Analysis View):**
+- Month selector (same as other tabs)
+- Table showing per-person fees for selected month:
+  - Person name
+  - Completion percentage (excluding expired debt credits)
+  - Base fee/credit
+  - Expired debt fees
+  - Total fee/credit
+  - Status (Pending/Processed)
+- "Recalculate" button: Recalculates all fees for the selected month
+- "Mark Processed" button: Marks individual fees as processed (after rent calculation)
+- Running Tally section: Shows total fees/credits per person across all months
+
+**Fee Settings Tab (Admin View):**
+- Reward threshold input
+- Reward amount input
+- Penalty modifier input
+- Example calculation display
+- Save button to update settings
+
 ### Month Key Format
 
 Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is used for:
@@ -394,6 +572,12 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
      - Shows expiration status (expired debts are visually distinguished)
      - Displays which completion created each debt
      - Shows expiration dates for expired debts
+   - **Fees/Credits**: Monthly fee and credit tracking
+     - View fees/credits for selected month
+     - See base fees, expired debt fees, and totals per person
+     - Click "Recalculate" to process expired debts and recalculate fees
+     - Mark fees as "Processed" after rent calculation
+     - View running tally of all fees/credits per person
 
 ## Component Architecture
 
@@ -465,7 +649,7 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `debts`: Array of all debts
 
 **Features:**
-- Tab navigation (Individual, House Total, History, Debts)
+- Tab navigation (Individual, House Total, History, Debts, Fees/Credits)
 - Month navigation
 - Progress rings for visual percentage display
 - History table with configurable time range (3/6/12 months)
@@ -473,9 +657,15 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - Chore breakdown per person
 - **Adjusted Stats Toggle**: View stats with or without expired debt credits
 - **Expired Debt Indicators**: Visual distinction for expired debts in the "Who Owes Who" tab
+- **Fees/Credits Tab**: Monthly fee tracking with base fees, expired debt fees, and running tallies
 
 **Key Functions:**
 - `calculatePersonStats(personId, monthFilter)`: Calculates expected, completed, percentage, and breakdown
+- `calculatePersonStatsWithoutExpiredDebts(personId, monthFilter)`: Calculates stats excluding expired debt credits
+- `calculateBaseFee(completionPercentage, feeSettings)`: Calculates base fee/credit from completion percentage
+- `calculateExpiredDebtFee(debt)`: Calculates retroactive fee adjustment for an expired debt
+- `calculateMonthlyFees(monthKey)`: Calculates and stores monthly fees for all people for a given month
+- `processExpiredDebts()`: Processes all unprocessed expired debts and calculates their fees
 - `houseStats()`: Aggregates all people's stats for current month
 - `getLastNMonths(n)`: Generates array of month objects for history view
 
@@ -488,12 +678,13 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `db`: Firestore database instance
 
 **Features:**
-- Tab navigation (People, Chores, Assignments)
+- Tab navigation (People, Chores, Assignments, Fee Settings)
 - CRUD operations for people
 - CRUD operations for chores
 - CRUD operations for assignments
 - Day-specific assignment option
 - Cascade delete (deleting person/chore also deletes assignments)
+- **Fee Settings**: Configure reward threshold, reward amount, and penalty modifier
 
 ### ProgressRing Component
 

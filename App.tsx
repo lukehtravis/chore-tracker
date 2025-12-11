@@ -70,6 +70,8 @@ export default function App() {
   const [completions, setCompletions] = useState([]);
   const [debts, setDebts] = useState([]);
   const [debtPayments, setDebtPayments] = useState([]);
+  const [feeSettings, setFeeSettings] = useState(null);
+  const [monthlyFees, setMonthlyFees] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [showRecordModal, setShowRecordModal] = useState(false);
@@ -109,6 +111,33 @@ export default function App() {
         );
       }
     );
+    const unsubFeeSettings = onSnapshot(
+      doc(db, "feeSettings", "settings"),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setFeeSettings({ id: snapshot.id, ...snapshot.data() });
+        } else {
+          // Initialize with defaults if not present
+          const defaults = {
+            id: "settings",
+            rewardThreshold: 90,
+            rewardAmount: 20,
+            penaltyModifier: 1.0,
+            lastUpdated: new Date().toISOString(),
+          };
+          setFeeSettings(defaults);
+          setDoc(doc(db, "feeSettings", "settings"), defaults);
+        }
+      }
+    );
+    const unsubMonthlyFees = onSnapshot(
+      collection(db, "monthlyFees"),
+      (snapshot) => {
+        setMonthlyFees(
+          snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+        );
+      }
+    );
 
     // Check for expired debts when debts are loaded
     if (debts.length > 0) {
@@ -122,6 +151,8 @@ export default function App() {
       unsubCompletions();
       unsubDebts();
       unsubDebtPayments();
+      unsubFeeSettings();
+      unsubMonthlyFees();
     };
   }, []);
 
@@ -270,6 +301,9 @@ export default function App() {
             debts={debts}
             currentMonth={currentMonth}
             setCurrentMonth={setCurrentMonth}
+            feeSettings={feeSettings}
+            monthlyFees={monthlyFees}
+            db={db}
           />
         )}
         {currentView === "admin" && (
@@ -277,6 +311,7 @@ export default function App() {
             people={people}
             chores={chores}
             assignments={assignments}
+            feeSettings={feeSettings}
             db={db}
           />
         )}
@@ -966,9 +1001,13 @@ function AnalysisView({
   debts,
   currentMonth,
   setCurrentMonth,
+  feeSettings,
+  monthlyFees,
+  db,
 }) {
   const [selectedTab, setSelectedTab] = useState("individual");
   const [historyMonths, setHistoryMonths] = useState(6);
+  const [showProcessed, setShowProcessed] = useState(false);
   const monthKey = getMonthKey(currentMonth);
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -1239,6 +1278,275 @@ function AnalysisView({
 
   const house = houseStats();
 
+  // Fee calculation functions
+  const calculateBaseFee = (completionPercentage, settings) => {
+    if (!settings) return 0;
+    if (completionPercentage >= settings.rewardThreshold) {
+      return -settings.rewardAmount; // Negative = credit
+    } else {
+      return (100 - completionPercentage) * settings.penaltyModifier;
+    }
+  };
+
+  // Calculate stats excluding specific debt IDs
+  const calculatePersonStatsExcludingDebts = (
+    personId,
+    monthFilter,
+    excludeDebtIds
+  ) => {
+    const excludeSet = new Set(excludeDebtIds || []);
+
+    const filteredCompletions = completions.filter((c) => {
+      if (monthFilter && !c.date.startsWith(monthFilter)) {
+        return false;
+      }
+      if (c.isProvisional && c.sourceDebtId && excludeSet.has(c.sourceDebtId)) {
+        return false;
+      }
+      return true;
+    });
+
+    const personAssignments = assignments.filter(
+      (a) => a.personId === personId
+    );
+
+    const personCompletions = filteredCompletions.filter((c) => {
+      if (c.forPersonId === c.completedBy || !c.forPersonId) {
+        return c.completedBy === personId;
+      }
+      return c.forPersonId === personId;
+    });
+
+    let expectedMinutes = 0;
+    let completedMinutes = 0;
+
+    if (monthFilter) {
+      personAssignments.forEach((assignment) => {
+        const chore = chores.find((c) => c.id === assignment.choreId);
+        if (chore) {
+          expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+        }
+      });
+    } else {
+      if (personCompletions.length === 0) {
+        personAssignments.forEach((assignment) => {
+          const chore = chores.find((c) => c.id === assignment.choreId);
+          if (chore) {
+            expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+          }
+        });
+      } else {
+        const monthsWithCompletions = new Set();
+        personCompletions.forEach((completion) => {
+          const monthKey = completion.date.substring(0, 7);
+          monthsWithCompletions.add(monthKey);
+        });
+        const monthsToCount = monthsWithCompletions.size;
+        personAssignments.forEach((assignment) => {
+          const chore = chores.find((c) => c.id === assignment.choreId);
+          if (chore) {
+            expectedMinutes +=
+              chore.minutes * assignment.timesPerMonth * monthsToCount;
+          }
+        });
+      }
+    }
+
+    personCompletions.forEach((completion) => {
+      completedMinutes += completion.minutes;
+    });
+
+    const percentage =
+      expectedMinutes > 0
+        ? Math.round((completedMinutes / expectedMinutes) * 100)
+        : 0;
+
+    return { expectedMinutes, completedMinutes, percentage };
+  };
+
+  // Calculate expired debt fee for a specific debt
+  const calculateExpiredDebtFee = async (debt) => {
+    if (
+      !debt.expiredAt ||
+      (debt.remainingMinutes ?? 0) <= 0 ||
+      debt.feeCalculated
+    ) {
+      return null;
+    }
+
+    const sourceCompletion = completions.find(
+      (c) => c.id === debt.sourceCompletionId
+    );
+    if (!sourceCompletion) return null;
+
+    const completionMonthKey = sourceCompletion.date.substring(0, 7);
+    const expirationDate = new Date(debt.expiredAt);
+    const expirationMonthKey = getMonthKey(expirationDate);
+
+    // Target month is the month WHERE the debt expires (not the month after)
+    // This way expired debt fees are allocated in the same month as the expiration,
+    // which aligns with when rent is calculated (December fees → January rent)
+    const targetMonthKey = expirationMonthKey;
+
+    // Get all debts that expired BEFORE this one
+    const earlierExpiredDebts = debts.filter(
+      (d) =>
+        d.expiredAt &&
+        d.id !== debt.id &&
+        new Date(d.expiredAt) < expirationDate &&
+        (d.remainingMinutes ?? 0) > 0
+    );
+    const earlierExpiredDebtIds = earlierExpiredDebts.map((d) => d.id);
+
+    // Calculate stats WITHOUT this debt's credit (and without earlier expired debts)
+    const statsWithout = calculatePersonStatsExcludingDebts(
+      debt.debtorId,
+      completionMonthKey,
+      [...earlierExpiredDebtIds, debt.id]
+    );
+
+    // Calculate stats WITH this debt's credit (but without earlier expired debts)
+    const statsWith = calculatePersonStatsExcludingDebts(
+      debt.debtorId,
+      completionMonthKey,
+      earlierExpiredDebtIds
+    );
+
+    const feeWithout = calculateBaseFee(statsWithout.percentage, feeSettings);
+    const feeWith = calculateBaseFee(statsWith.percentage, feeSettings);
+    const delta = feeWithout - feeWith;
+
+    return {
+      debtId: debt.id,
+      personId: debt.debtorId,
+      targetMonthKey,
+      delta,
+    };
+  };
+
+  // Calculate and store monthly fees for a given month
+  const calculateMonthlyFees = async (monthKey) => {
+    if (!feeSettings) return;
+
+    // First, process any unprocessed expired debts
+    await processExpiredDebts();
+
+    for (const person of people) {
+      // Use stats WITHOUT expired debts for base fee calculation
+      const stats = calculatePersonStatsWithoutExpiredDebts(
+        person.id,
+        monthKey
+      );
+      const baseFee = calculateBaseFee(stats.percentage, feeSettings);
+
+      // Get expired debt fees from existing monthly fees for this person/month
+      // (These are calculated when debts expire via processExpiredDebts)
+      const existingFeeForPerson = monthlyFees.find(
+        (f) => f.personId === person.id && f.monthKey === monthKey
+      );
+      const expiredDebtFees = existingFeeForPerson?.expiredDebtFees || 0;
+
+      const totalFee = baseFee + expiredDebtFees;
+
+      // Find or create monthly fee record
+      const existingFee = monthlyFees.find(
+        (f) => f.personId === person.id && f.monthKey === monthKey
+      );
+
+      const feeData = {
+        personId: person.id,
+        monthKey,
+        baseFee,
+        expiredDebtFees,
+        totalFee,
+        calculatedAt: new Date().toISOString(),
+        processed: existingFee?.processed || false,
+      };
+
+      if (existingFee) {
+        await updateDoc(doc(db, "monthlyFees", existingFee.id), feeData);
+      } else {
+        const feeId = generateId();
+        await setDoc(doc(db, "monthlyFees", feeId), {
+          id: feeId,
+          ...feeData,
+        });
+      }
+    }
+  };
+
+  // Process expired debts and calculate fees
+  const processExpiredDebts = async () => {
+    const unprocessedExpiredDebts = debts
+      .filter(
+        (d) => d.expiredAt && !d.feeCalculated && (d.remainingMinutes ?? 0) > 0
+      )
+      .sort((a, b) => {
+        // Sort by expiration date to process in order
+        const dateA = new Date(a.expiredAt).getTime();
+        const dateB = new Date(b.expiredAt).getTime();
+        return dateA - dateB;
+      });
+
+    for (const debt of unprocessedExpiredDebts) {
+      const feeResult = await calculateExpiredDebtFee(debt);
+      if (feeResult) {
+        // Update or create monthly fee record
+        const existingFee = monthlyFees.find(
+          (f) =>
+            f.personId === feeResult.personId &&
+            f.monthKey === feeResult.targetMonthKey
+        );
+
+        if (existingFee) {
+          const newExpiredDebtFees =
+            (existingFee.expiredDebtFees || 0) + feeResult.delta;
+          const newTotalFee = existingFee.baseFee + newExpiredDebtFees;
+          await updateDoc(doc(db, "monthlyFees", existingFee.id), {
+            expiredDebtFees: newExpiredDebtFees,
+            totalFee: newTotalFee,
+          });
+        } else {
+          // Need to calculate base fee first
+          // Use stats without expired debts for consistency
+          const stats = calculatePersonStatsWithoutExpiredDebts(
+            feeResult.personId,
+            feeResult.targetMonthKey
+          );
+          const baseFee = calculateBaseFee(stats.percentage, feeSettings);
+          const feeId = generateId();
+          await setDoc(doc(db, "monthlyFees", feeId), {
+            id: feeId,
+            personId: feeResult.personId,
+            monthKey: feeResult.targetMonthKey,
+            baseFee,
+            expiredDebtFees: feeResult.delta,
+            totalFee: baseFee + feeResult.delta,
+            calculatedAt: new Date().toISOString(),
+            processed: false,
+          });
+        }
+
+        // Mark debt as fee calculated
+        await updateDoc(doc(db, "debts", debt.id), {
+          feeCalculated: true,
+        });
+      }
+    }
+  };
+
+  // Auto-process expired debts when viewing fees tab
+  useEffect(() => {
+    if (selectedTab === "fees" && feeSettings && debts.length > 0) {
+      // Process expired debts to calculate fees
+      const processDebts = async () => {
+        await processExpiredDebts();
+      };
+      processDebts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTab, debts.length, feeSettings]);
+
   return (
     <div className="fade-in">
       {/* Month Navigation */}
@@ -1291,6 +1599,7 @@ function AnalysisView({
           { id: "house", label: "House Total" },
           { id: "history", label: "History" },
           { id: "debts", label: "Who Owes Who" },
+          { id: "fees", label: "Fees/Credits" },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -1971,6 +2280,351 @@ function AnalysisView({
           </p>
         </div>
       )}
+
+      {/* Fees/Credits */}
+      {selectedTab === "fees" && (
+        <div className="space-y-6">
+          {!feeSettings ? (
+            <div className="bg-white rounded-2xl card-shadow p-8 text-center">
+              <p className="text-stone-500">Loading fee settings...</p>
+            </div>
+          ) : (
+            <>
+              {/* Controls */}
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm text-stone-700">
+                    <input
+                      type="checkbox"
+                      checked={showProcessed}
+                      onChange={(e) => setShowProcessed(e.target.checked)}
+                      className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
+                    />
+                    Show Processed
+                  </label>
+                </div>
+                <button
+                  onClick={() => calculateMonthlyFees(monthKey)}
+                  className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 transition-colors"
+                >
+                  Recalculate
+                </button>
+              </div>
+
+              {/* Fees Table */}
+              <div className="bg-white rounded-2xl card-shadow overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="bg-stone-50 border-b border-stone-200">
+                        <th className="text-left p-4 font-semibold text-stone-700">
+                          Person
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Completion %
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Base Fee/Credit
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Expired Debt Fees
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Total
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Status
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {people.map((person) => {
+                        // Use stats WITHOUT expired debts to match Individual tab
+                        const stats = calculatePersonStatsWithoutExpiredDebts(
+                          person.id,
+                          monthKey
+                        );
+                        const baseFee = calculateBaseFee(
+                          stats.percentage,
+                          feeSettings
+                        );
+                        const monthlyFee = monthlyFees.find(
+                          (f) =>
+                            f.personId === person.id && f.monthKey === monthKey
+                        );
+
+                        if (!monthlyFee && !showProcessed) {
+                          // Calculate expired debt fees on-the-fly for display
+                          // Find expired debts that should contribute to this month
+                          const expiredDebtsForMonth = debts.filter((d) => {
+                            if (
+                              !d.expiredAt ||
+                              (d.remainingMinutes ?? 0) <= 0 ||
+                              d.debtorId !== person.id
+                            ) {
+                              return false;
+                            }
+                            // Expired debt fees go to the expiration month
+                            const expirationDate = new Date(d.expiredAt);
+                            const expirationMonthKey =
+                              getMonthKey(expirationDate);
+                            return expirationMonthKey === monthKey;
+                          });
+
+                          // Calculate expired debt fees (simplified - will be properly calculated when processed)
+                          let expiredDebtFees = 0;
+                          // Note: Full calculation requires processing expired debts, which happens via processExpiredDebts
+                          // For display purposes, we'll show 0 if not yet calculated
+
+                          const totalFee = baseFee + expiredDebtFees;
+
+                          return (
+                            <tr
+                              key={person.id}
+                              className="border-b border-stone-100 hover:bg-stone-50/50"
+                            >
+                              <td className="p-4 font-medium text-stone-800">
+                                {person.name}
+                              </td>
+                              <td className="p-4 text-center text-stone-700">
+                                {stats.percentage}%
+                              </td>
+                              <td
+                                className={`p-4 text-center font-medium ${
+                                  baseFee < 0
+                                    ? "text-green-600"
+                                    : "text-red-600"
+                                }`}
+                              >
+                                {baseFee < 0 ? "-" : ""}$
+                                {Math.abs(baseFee).toFixed(2)}
+                              </td>
+                              <td className="p-4 text-center text-stone-600">
+                                $0.00
+                              </td>
+                              <td
+                                className={`p-4 text-center font-semibold ${
+                                  totalFee < 0
+                                    ? "text-green-600"
+                                    : "text-red-600"
+                                }`}
+                              >
+                                {totalFee < 0 ? "-" : ""}$
+                                {Math.abs(totalFee).toFixed(2)}
+                              </td>
+                              <td className="p-4 text-center">
+                                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                                  Pending
+                                </span>
+                              </td>
+                              <td className="p-4 text-center">
+                                <button
+                                  onClick={() => calculateMonthlyFees(monthKey)}
+                                  className="text-xs text-stone-600 hover:text-stone-800 underline"
+                                >
+                                  Calculate
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        if (
+                          monthlyFee &&
+                          (!monthlyFee.processed || showProcessed)
+                        ) {
+                          // Check for expired debts that should contribute to this month
+                          const expiredDebtsForMonth = debts.filter((d) => {
+                            if (
+                              !d.expiredAt ||
+                              (d.remainingMinutes ?? 0) <= 0 ||
+                              d.debtorId !== person.id
+                            ) {
+                              return false;
+                            }
+                            // Expired debt fees go to the expiration month
+                            const expirationDate = new Date(d.expiredAt);
+                            const expirationMonthKey =
+                              getMonthKey(expirationDate);
+                            return expirationMonthKey === monthKey;
+                          });
+                          const unprocessedExpiredDebts =
+                            expiredDebtsForMonth.filter(
+                              (d) => !d.feeCalculated
+                            );
+
+                          return (
+                            <tr
+                              key={person.id}
+                              className={`border-b border-stone-100 hover:bg-stone-50/50 ${
+                                monthlyFee.processed ? "opacity-60" : ""
+                              }`}
+                            >
+                              <td className="p-4 font-medium text-stone-800">
+                                {person.name}
+                              </td>
+                              <td className="p-4 text-center text-stone-700">
+                                {stats.percentage}%
+                              </td>
+                              <td
+                                className={`p-4 text-center font-medium ${
+                                  monthlyFee.baseFee < 0
+                                    ? "text-green-600"
+                                    : "text-red-600"
+                                }`}
+                              >
+                                {monthlyFee.baseFee < 0 ? "-" : ""}$
+                                {Math.abs(monthlyFee.baseFee).toFixed(2)}
+                              </td>
+                              <td className="p-4 text-center text-red-600 font-medium">
+                                ${(monthlyFee.expiredDebtFees || 0).toFixed(2)}
+                                {unprocessedExpiredDebts.length > 0 && (
+                                  <span className="block text-xs text-amber-600 mt-1">
+                                    ({unprocessedExpiredDebts.length} expired
+                                    debt
+                                    {unprocessedExpiredDebts.length > 1
+                                      ? "s"
+                                      : ""}{" "}
+                                    pending calculation)
+                                  </span>
+                                )}
+                              </td>
+                              <td
+                                className={`p-4 text-center font-semibold ${
+                                  monthlyFee.totalFee < 0
+                                    ? "text-green-600"
+                                    : "text-red-600"
+                                }`}
+                              >
+                                {monthlyFee.totalFee < 0 ? "-" : ""}$
+                                {Math.abs(monthlyFee.totalFee).toFixed(2)}
+                              </td>
+                              <td className="p-4 text-center">
+                                <span
+                                  className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                                    monthlyFee.processed
+                                      ? "bg-stone-100 text-stone-700"
+                                      : "bg-amber-100 text-amber-700"
+                                  }`}
+                                >
+                                  {monthlyFee.processed
+                                    ? "Processed"
+                                    : "Pending"}
+                                </span>
+                              </td>
+                              <td className="p-4 text-center">
+                                {!monthlyFee.processed && (
+                                  <button
+                                    onClick={async () => {
+                                      await updateDoc(
+                                        doc(db, "monthlyFees", monthlyFee.id),
+                                        { processed: true }
+                                      );
+                                    }}
+                                    className="text-xs text-stone-600 hover:text-stone-800 underline"
+                                  >
+                                    Mark Processed
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return null;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Running Tally */}
+              <div className="bg-white rounded-2xl card-shadow p-6">
+                <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+                  Running Tally
+                </h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="bg-stone-50 border-b border-stone-200">
+                        <th className="text-left p-4 font-semibold text-stone-700">
+                          Person
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Total Base Fees
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Total Expired Debt Fees
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
+                          Grand Total
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {people.map((person) => {
+                        const personFees = monthlyFees.filter(
+                          (f) => f.personId === person.id && f.processed
+                        );
+                        const totalBase = personFees.reduce(
+                          (sum, f) => sum + (f.baseFee || 0),
+                          0
+                        );
+                        const totalExpired = personFees.reduce(
+                          (sum, f) => sum + (f.expiredDebtFees || 0),
+                          0
+                        );
+                        const grandTotal = totalBase + totalExpired;
+
+                        return (
+                          <tr
+                            key={person.id}
+                            className="border-b border-stone-100 hover:bg-stone-50/50"
+                          >
+                            <td className="p-4 font-medium text-stone-800">
+                              {person.name}
+                            </td>
+                            <td
+                              className={`p-4 text-center font-medium ${
+                                totalBase < 0
+                                  ? "text-green-600"
+                                  : "text-red-600"
+                              }`}
+                            >
+                              {totalBase < 0 ? "-" : ""}$
+                              {Math.abs(totalBase).toFixed(2)}
+                            </td>
+                            <td className="p-4 text-center text-red-600 font-medium">
+                              ${totalExpired.toFixed(2)}
+                            </td>
+                            <td
+                              className={`p-4 text-center font-semibold ${
+                                grandTotal < 0
+                                  ? "text-green-600"
+                                  : "text-red-600"
+                              }`}
+                            >
+                              {grandTotal < 0 ? "-" : ""}$
+                              {Math.abs(grandTotal).toFixed(2)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-xs text-stone-500 mt-4">
+                  Running tally includes only processed fees (fees that have
+                  been included in rent calculations).
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2026,8 +2680,27 @@ function ProgressRing({ percentage, size = 64, strokeWidth = 4 }) {
 }
 
 // Admin View Component
-function AdminView({ people, chores, assignments, db }) {
+function AdminView({ people, chores, assignments, feeSettings, db }) {
   const [activeSection, setActiveSection] = useState("people");
+  const [rewardThreshold, setRewardThreshold] = useState(
+    feeSettings?.rewardThreshold || 90
+  );
+  const [rewardAmount, setRewardAmount] = useState(
+    feeSettings?.rewardAmount || 20
+  );
+  const [penaltyModifier, setPenaltyModifier] = useState(
+    feeSettings?.penaltyModifier || 1.0
+  );
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Update local state when feeSettings change
+  useEffect(() => {
+    if (feeSettings) {
+      setRewardThreshold(feeSettings.rewardThreshold || 90);
+      setRewardAmount(feeSettings.rewardAmount || 20);
+      setPenaltyModifier(feeSettings.penaltyModifier || 1.0);
+    }
+  }, [feeSettings]);
   const [newPersonName, setNewPersonName] = useState("");
   const [newChoreName, setNewChoreName] = useState("");
   const [newChoreMinutes, setNewChoreMinutes] = useState("");
@@ -2155,6 +2828,7 @@ function AdminView({ people, chores, assignments, db }) {
           { id: "people", label: "People" },
           { id: "chores", label: "Chores" },
           { id: "assignments", label: "Assignments" },
+          { id: "feeSettings", label: "Fee Settings" },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -2461,6 +3135,115 @@ function AdminView({ people, chores, assignments, db }) {
                 them.
               </p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Fee Settings Section */}
+      {activeSection === "feeSettings" && (
+        <div className="bg-white rounded-2xl card-shadow p-6">
+          <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+            Fee & Credit Settings
+          </h3>
+
+          <div className="space-y-6 max-w-2xl">
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-2">
+                Reward Threshold (%)
+              </label>
+              <p className="text-xs text-stone-500 mb-2">
+                Completion percentage required to receive a reward credit
+              </p>
+              <input
+                type="number"
+                value={rewardThreshold}
+                onChange={(e) =>
+                  setRewardThreshold(parseFloat(e.target.value) || 90)
+                }
+                min="0"
+                max="100"
+                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-2">
+                Reward Amount ($)
+              </label>
+              <p className="text-xs text-stone-500 mb-2">
+                Dollar amount of credit received when meeting the reward
+                threshold
+              </p>
+              <input
+                type="number"
+                value={rewardAmount}
+                onChange={(e) =>
+                  setRewardAmount(parseFloat(e.target.value) || 20)
+                }
+                min="0"
+                step="0.01"
+                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-2">
+                Penalty Modifier
+              </label>
+              <p className="text-xs text-stone-500 mb-2">
+                Multiplier for penalty calculation: (100 - completion%) ×
+                modifier
+              </p>
+              <input
+                type="number"
+                value={penaltyModifier}
+                onChange={(e) =>
+                  setPenaltyModifier(parseFloat(e.target.value) || 1.0)
+                }
+                min="0"
+                step="0.1"
+                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+              />
+            </div>
+
+            <div className="bg-stone-50 rounded-xl p-4">
+              <p className="text-sm font-medium text-stone-700 mb-2">
+                Example Calculations:
+              </p>
+              <ul className="text-xs text-stone-600 space-y-1">
+                <li>
+                  • 80% completion: Fee = (100 - 80) × {penaltyModifier} = $
+                  {((100 - 80) * penaltyModifier).toFixed(2)}
+                </li>
+                <li>
+                  • {rewardThreshold}% completion: Credit = -$
+                  {rewardAmount.toFixed(2)}
+                </li>
+                <li>
+                  • 50% completion: Fee = (100 - 50) × {penaltyModifier} = $
+                  {((100 - 50) * penaltyModifier).toFixed(2)}
+                </li>
+              </ul>
+            </div>
+
+            <button
+              onClick={async () => {
+                setSavingSettings(true);
+                const settingsData = {
+                  id: "settings",
+                  rewardThreshold,
+                  rewardAmount,
+                  penaltyModifier,
+                  lastUpdated: new Date().toISOString(),
+                };
+                await setDoc(doc(db, "feeSettings", "settings"), settingsData);
+                setSavingSettings(false);
+              }}
+              disabled={savingSettings}
+              className="px-6 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {savingSettings ? "Saving..." : "Save Settings"}
+            </button>
           </div>
         </div>
       )}

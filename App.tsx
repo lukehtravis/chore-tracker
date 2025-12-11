@@ -290,6 +290,7 @@ export default function App() {
           chores={chores}
           assignments={assignments}
           debts={debts}
+          completions={completions}
           onClose={() => {
             setShowRecordModal(false);
             setSelectedDate(null);
@@ -544,6 +545,7 @@ function RecordChoreModal({
   chores,
   assignments,
   debts,
+  completions,
   onClose,
   db,
 }) {
@@ -1217,7 +1219,10 @@ function AnalysisView({
     let totalCompleted = 0;
 
     people.forEach((person) => {
-      const stats = calculatePersonStats(person.id, monthKey);
+      const stats = calculatePersonStatsWithoutExpiredDebts(
+        person.id,
+        monthKey
+      );
       totalExpected += stats.expectedMinutes;
       totalCompleted += stats.completedMinutes;
     });
@@ -1305,8 +1310,13 @@ function AnalysisView({
       {selectedTab === "individual" && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {people.map((person, idx) => {
-            const monthStats = calculatePersonStats(person.id, monthKey);
-            const allTimeStats = calculatePersonStats(person.id);
+            const monthStats = calculatePersonStatsWithoutExpiredDebts(
+              person.id,
+              monthKey
+            );
+            const allTimeStats = calculatePersonStatsWithoutExpiredDebts(
+              person.id
+            );
 
             return (
               <div
@@ -1403,10 +1413,28 @@ function AnalysisView({
               Chore Completion Status
             </h3>
             {(() => {
-              // Get all completions for the current month
-              const monthCompletions = completions.filter((c) =>
-                c.date.startsWith(monthKey)
+              // Get expired debt IDs
+              const expiredDebtIds = new Set(
+                debts
+                  .filter((d) => d.expiredAt && (d.remainingMinutes ?? 0) > 0)
+                  .map((d) => d.id)
               );
+
+              // Get all completions for the current month, excluding expired debt credits
+              const monthCompletions = completions.filter((c) => {
+                if (!c.date.startsWith(monthKey)) return false;
+
+                // Exclude completions from expired debts
+                if (
+                  c.isProvisional &&
+                  c.sourceDebtId &&
+                  expiredDebtIds.has(c.sourceDebtId)
+                ) {
+                  return false;
+                }
+
+                return true;
+              });
 
               // Calculate expected and completed minutes per chore
               const choreStatus = {};
@@ -1533,7 +1561,10 @@ function AnalysisView({
             const historyMonthsToShow = baseMonths.filter((m) => {
               if (m.key === realCurrentMonthKey) return true;
               return people.some((person) => {
-                const stats = calculatePersonStats(person.id, m.key);
+                const stats = calculatePersonStatsWithoutExpiredDebts(
+                  person.id,
+                  m.key
+                );
                 return stats.completedMinutes > 0;
               });
             });
@@ -1585,7 +1616,10 @@ function AnalysisView({
                       <tbody>
                         {people.map((person) => {
                           const monthData = historyMonthsToShow.map((m) =>
-                            calculatePersonStats(person.id, m.key)
+                            calculatePersonStatsWithoutExpiredDebts(
+                              person.id,
+                              m.key
+                            )
                           );
                           const totalCompleted = monthData.reduce(
                             (sum, m) => sum + m.completedMinutes,

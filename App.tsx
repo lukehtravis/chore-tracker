@@ -1007,7 +1007,6 @@ function AnalysisView({
 }) {
   const [selectedTab, setSelectedTab] = useState("individual");
   const [historyMonths, setHistoryMonths] = useState(6);
-  const [showProcessed, setShowProcessed] = useState(false);
   const monthKey = getMonthKey(currentMonth);
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -2291,18 +2290,7 @@ function AnalysisView({
           ) : (
             <>
               {/* Controls */}
-              <div className="flex items-center justify-between flex-wrap gap-4">
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-2 text-sm text-stone-700">
-                    <input
-                      type="checkbox"
-                      checked={showProcessed}
-                      onChange={(e) => setShowProcessed(e.target.checked)}
-                      className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
-                    />
-                    Show Processed
-                  </label>
-                </div>
+              <div className="flex items-center justify-end flex-wrap gap-4">
                 <button
                   onClick={() => calculateMonthlyFees(monthKey)}
                   className="px-4 py-2 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 transition-colors"
@@ -2356,7 +2344,7 @@ function AnalysisView({
                             f.personId === person.id && f.monthKey === monthKey
                         );
 
-                        if (!monthlyFee && !showProcessed) {
+                        if (!monthlyFee) {
                           // Calculate expired debt fees on-the-fly for display
                           // Find expired debts that should contribute to this month
                           const expiredDebtsForMonth = debts.filter((d) => {
@@ -2432,10 +2420,7 @@ function AnalysisView({
                           );
                         }
 
-                        if (
-                          monthlyFee &&
-                          (!monthlyFee.processed || showProcessed)
-                        ) {
+                        if (monthlyFee) {
                           // Check for expired debts that should contribute to this month
                           const expiredDebtsForMonth = debts.filter((d) => {
                             if (

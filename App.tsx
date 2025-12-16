@@ -1597,8 +1597,8 @@ function AnalysisView({
           { id: "individual", label: "Individual" },
           { id: "house", label: "House Total" },
           { id: "history", label: "History" },
-          { id: "debts", label: "Who Owes Who" },
-          { id: "fees", label: "Fees/Credits" },
+          { id: "debts", label: "Debts" },
+          { id: "fees", label: "Fees" },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -2300,7 +2300,7 @@ function AnalysisView({
               </div>
 
               {/* Fees Table */}
-              <div className="bg-white rounded-2xl card-shadow overflow-hidden">
+              <div className="bg-white rounded-2xl card-shadow">
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead>

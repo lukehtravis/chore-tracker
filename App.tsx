@@ -72,6 +72,7 @@ export default function App() {
   const [debtPayments, setDebtPayments] = useState([]);
   const [feeSettings, setFeeSettings] = useState(null);
   const [monthlyFees, setMonthlyFees] = useState([]);
+  const [communityChoreTypes, setCommunityChoreTypes] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [showRecordModal, setShowRecordModal] = useState(false);
@@ -115,7 +116,37 @@ export default function App() {
       doc(db, "feeSettings", "settings"),
       (snapshot) => {
         if (snapshot.exists()) {
-          setFeeSettings({ id: snapshot.id, ...snapshot.data() });
+          const data = snapshot.data();
+          // Initialize communityCreditTiers if missing (migration)
+          const defaults = {
+            id: "settings",
+            rewardThreshold: 90,
+            rewardAmount: 20,
+            penaltyModifier: 1.0,
+            communityCreditTiers: [
+              { min: 0, credit: 0 },
+              { min: 30, credit: 5 },
+              { min: 60, credit: 10 },
+              { min: 90, credit: 15 },
+              { min: 120, credit: 20 },
+            ],
+            lastUpdated: new Date().toISOString(),
+          };
+          const settings = {
+            id: snapshot.id,
+            ...defaults,
+            ...data,
+            // Ensure communityCreditTiers exists
+            communityCreditTiers:
+              data.communityCreditTiers || defaults.communityCreditTiers,
+          };
+          setFeeSettings(settings);
+          // Update in Firebase if communityCreditTiers was missing
+          if (!data.communityCreditTiers) {
+            updateDoc(doc(db, "feeSettings", "settings"), {
+              communityCreditTiers: defaults.communityCreditTiers,
+            });
+          }
         } else {
           // Initialize with defaults if not present
           const defaults = {
@@ -123,11 +154,26 @@ export default function App() {
             rewardThreshold: 90,
             rewardAmount: 20,
             penaltyModifier: 1.0,
+            communityCreditTiers: [
+              { min: 0, credit: 0 },
+              { min: 30, credit: 5 },
+              { min: 60, credit: 10 },
+              { min: 90, credit: 15 },
+              { min: 120, credit: 20 },
+            ],
             lastUpdated: new Date().toISOString(),
           };
           setFeeSettings(defaults);
           setDoc(doc(db, "feeSettings", "settings"), defaults);
         }
+      }
+    );
+    const unsubCommunityChoreTypes = onSnapshot(
+      collection(db, "communityChoreTypes"),
+      (snapshot) => {
+        setCommunityChoreTypes(
+          snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+        );
       }
     );
     const unsubMonthlyFees = onSnapshot(
@@ -153,6 +199,7 @@ export default function App() {
       unsubDebtPayments();
       unsubFeeSettings();
       unsubMonthlyFees();
+      unsubCommunityChoreTypes();
     };
   }, []);
 
@@ -289,6 +336,7 @@ export default function App() {
             showRecordModal={showRecordModal}
             setShowRecordModal={setShowRecordModal}
             assignments={assignments}
+            communityChoreTypes={communityChoreTypes}
             db={db}
           />
         )}
@@ -303,6 +351,7 @@ export default function App() {
             setCurrentMonth={setCurrentMonth}
             feeSettings={feeSettings}
             monthlyFees={monthlyFees}
+            communityChoreTypes={communityChoreTypes}
             db={db}
           />
         )}
@@ -312,6 +361,7 @@ export default function App() {
             chores={chores}
             assignments={assignments}
             feeSettings={feeSettings}
+            communityChoreTypes={communityChoreTypes}
             db={db}
           />
         )}
@@ -326,6 +376,7 @@ export default function App() {
           assignments={assignments}
           debts={debts}
           completions={completions}
+          communityChoreTypes={communityChoreTypes}
           onClose={() => {
             setShowRecordModal(false);
             setSelectedDate(null);
@@ -349,6 +400,7 @@ function CalendarView({
   showRecordModal,
   setShowRecordModal,
   assignments,
+  communityChoreTypes,
   db,
 }) {
   const year = currentMonth.getFullYear();
@@ -522,6 +574,35 @@ function CalendarView({
                 </div>
                 <div className="flex flex-wrap gap-1">
                   {dayCompletions.map((completion, idx) => {
+                    const isCommunity = completion.type === "community";
+
+                    if (isCommunity) {
+                      const communityType = communityChoreTypes.find(
+                        (t) => t.id === completion.communityChoreTypeId
+                      );
+                      const typeName = communityType?.name || "Unknown";
+                      const displayName =
+                        typeName.length > 10
+                          ? typeName.substring(0, 10) + "..."
+                          : typeName;
+                      const completedByPerson = people.find(
+                        (p) => p.id === completion.completedBy
+                      );
+
+                      return (
+                        <div
+                          key={idx}
+                          className="px-2 py-0.5 rounded-sm bg-cyan-500 text-white text-xs font-medium whitespace-nowrap"
+                          title={`Community: ${typeName} - ${
+                            completion.minutes
+                          } min (by ${completedByPerson?.name || "Unknown"})`}
+                        >
+                          {displayName}
+                        </div>
+                      );
+                    }
+
+                    // Individual completion
                     const chore = chores.find(
                       (c) => c.id === completion.choreId
                     );
@@ -581,11 +662,16 @@ function RecordChoreModal({
   assignments,
   debts,
   completions,
+  communityChoreTypes,
   onClose,
   db,
 }) {
+  const [isCommunityMode, setIsCommunityMode] = useState(false);
   const [selectedPerson, setSelectedPerson] = useState("");
   const [selectedChore, setSelectedChore] = useState("");
+  const [selectedCommunityChoreType, setSelectedCommunityChoreType] =
+    useState("");
+  const [communityMinutes, setCommunityMinutes] = useState("");
   const [saving, setSaving] = useState(false);
   const [isPartial, setIsPartial] = useState(false);
   const [partialMinutes, setPartialMinutes] = useState("");
@@ -681,23 +767,51 @@ function RecordChoreModal({
   };
 
   const handleSave = async () => {
-    if (!selectedPerson || !selectedChore) return;
-    if (isPartial && !partialMinutes) return;
-
-    if (isNewDebt && !dueDate) {
-      // Require a due date when this completion will create a new debt
-      return;
+    if (isCommunityMode) {
+      // Community mode validation
+      if (!selectedPerson || !selectedCommunityChoreType || !communityMinutes)
+        return;
+      const minutesDone = parseInt(communityMinutes, 10);
+      if (isNaN(minutesDone) || minutesDone <= 0 || minutesDone > 999) return;
+    } else {
+      // Individual mode validation
+      if (!selectedPerson || !selectedChore) return;
+      if (isPartial && !partialMinutes) return;
+      if (isNewDebt && !dueDate) {
+        // Require a due date when this completion will create a new debt
+        return;
+      }
     }
 
     setSaving(true);
 
     const completionId = generateId();
+    const nowIso = new Date().toISOString();
+
+    if (isCommunityMode) {
+      // Community completion
+      const minutesDone = parseInt(communityMinutes, 10);
+      const completionData = {
+        id: completionId,
+        date,
+        completedBy: selectedPerson,
+        type: "community",
+        communityChoreTypeId: selectedCommunityChoreType,
+        minutes: minutesDone,
+        createdAt: nowIso,
+      };
+
+      await setDoc(doc(db, "completions", completionId), completionData);
+      setSaving(false);
+      onClose();
+      return;
+    }
+
+    // Individual completion (existing logic)
     const chore = chores.find((c) => c.id === selectedChore);
     const minutesDone = isPartial
       ? parseInt(partialMinutes, 10)
       : chore?.minutes ?? 0;
-
-    const nowIso = new Date().toISOString();
 
     // Determine if this will create a new debt (needed for isProvisional)
     let debtIdForCompletion = undefined;
@@ -713,6 +827,7 @@ function RecordChoreModal({
       choreId: selectedChore,
       minutes: minutesDone,
       createdAt: nowIso,
+      type: "individual",
       // Who this chore was done for; can be the same as selectedPerson
       // If not explicitly chosen, default to the person who did the chore
       forPersonId: forPersonId || selectedPerson,
@@ -816,9 +931,50 @@ function RecordChoreModal({
         className="bg-white rounded-2xl card-shadow w-full max-w-md p-6 fade-in"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="font-display text-xl font-semibold text-stone-800 mb-1">
-          Record Chore
-        </h3>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-xl font-semibold text-stone-800">
+            Record Chore
+          </h3>
+          <div className="flex items-center gap-2">
+            <span
+              className={`text-xs font-medium ${
+                !isCommunityMode ? "text-stone-800" : "text-stone-400"
+              }`}
+            >
+              Individual
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setIsCommunityMode(!isCommunityMode);
+                // Reset form when switching modes
+                setSelectedChore("");
+                setSelectedCommunityChoreType("");
+                setCommunityMinutes("");
+                setIsPartial(false);
+                setPartialMinutes("");
+                setForPersonId("");
+                setDueDate("");
+              }}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                isCommunityMode ? "bg-cyan-500" : "bg-stone-300"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  isCommunityMode ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+            <span
+              className={`text-xs font-medium ${
+                isCommunityMode ? "text-cyan-600" : "text-stone-400"
+              }`}
+            >
+              Community
+            </span>
+          </div>
+        </div>
         <p className="text-sm text-stone-500 mb-6">{formattedDate}</p>
 
         <div className="space-y-4">
@@ -842,124 +998,172 @@ function RecordChoreModal({
             </select>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-stone-700 mb-2">
-              Which chore?
-            </label>
-            <select
-              value={selectedChore}
-              onChange={(e) => setSelectedChore(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
-            >
-              <option value="">Select chore...</option>
-              {[...chores]
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map((chore) => (
-                  <option key={chore.id} value={chore.id}>
-                    {chore.name} ({chore.minutes} min)
-                  </option>
-                ))}
-            </select>
-          </div>
-
-          {/* Partial completion controls */}
-          <div className="flex items-center gap-2">
-            <input
-              id="partial-checkbox"
-              type="checkbox"
-              checked={isPartial}
-              onChange={(e) => {
-                setIsPartial(e.target.checked);
-                if (!e.target.checked) {
-                  setPartialMinutes("");
-                }
-              }}
-              className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
-            />
-            <label
-              htmlFor="partial-checkbox"
-              className="text-sm font-medium text-stone-700"
-            >
-              Partial Chore Completion
-            </label>
-          </div>
-
-          {isPartial && selectedChoreObj && (
+          {!isCommunityMode && (
             <div>
               <label className="block text-sm font-medium text-stone-700 mb-2">
-                Minutes completed (up to {selectedChoreObj.minutes} min)
+                Which chore?
               </label>
               <select
-                value={partialMinutes}
-                onChange={(e) => setPartialMinutes(e.target.value)}
+                value={selectedChore}
+                onChange={(e) => setSelectedChore(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
               >
-                <option value="">Select minutes...</option>
-                {getMinuteOptions().map((m) => (
-                  <option key={m} value={m}>
-                    {m} min
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Who was this chore for? */}
-          {shouldShowForPersonDropdown && (
-            <div>
-              <label className="block text-sm font-medium text-stone-700 mb-2">
-                Who was this chore for?
-              </label>
-              <select
-                value={forPersonId}
-                onChange={(e) => setForPersonId(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
-              >
-                <option value="">Select person...</option>
-                {assignedPeopleForChore
+                <option value="">Select chore...</option>
+                {[...chores]
                   .sort((a, b) => a.name.localeCompare(b.name))
-                  .map((person) => (
-                    <option key={person.id} value={person.id}>
-                      {person.name}
+                  .map((chore) => (
+                    <option key={chore.id} value={chore.id}>
+                      {chore.name} ({chore.minutes} min)
                     </option>
                   ))}
               </select>
-              {isCrossPerson && (
-                <p className="mt-1 text-xs text-stone-500">
-                  This will credit{" "}
-                  {people.find((p) => p.id === forPersonId)?.name ||
-                    "this person"}
-                  's stats{isNewDebt ? " (provisional until debt is paid)" : ""}
-                  {isPayment && (
-                    <>
-                      . There are existing open debts where{" "}
-                      {people.find((p) => p.id === selectedPerson)?.name} owes{" "}
-                      {people.find((p) => p.id === forPersonId)?.name}. This
-                      completion will automatically pay down the oldest debts
-                      first.
-                    </>
-                  )}
-                </p>
-              )}
             </div>
           )}
 
-          {/* Due date for new debts */}
-          {isNewDebt && (
-            <div>
-              <label className="block text-sm font-medium text-stone-700 mb-2">
-                Due date for this favor
-              </label>
-              <input
-                type="date"
-                value={dueDate}
-                onChange={(e) => setDueDate(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
-              />
-              <p className="mt-1 text-xs text-stone-500">
-                This is when the person you did this for should pay you back by.
-              </p>
-            </div>
+          {isCommunityMode && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Community Chore Type
+                </label>
+                <select
+                  value={selectedCommunityChoreType}
+                  onChange={(e) =>
+                    setSelectedCommunityChoreType(e.target.value)
+                  }
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+                >
+                  <option value="">Select type...</option>
+                  {[...communityChoreTypes]
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((type) => (
+                      <option key={type.id} value={type.id}>
+                        {type.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Minutes
+                </label>
+                <input
+                  type="number"
+                  value={communityMinutes}
+                  onChange={(e) => setCommunityMinutes(e.target.value)}
+                  min="1"
+                  max="999"
+                  placeholder="Enter minutes (1-999)"
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+                />
+              </div>
+            </>
+          )}
+
+          {!isCommunityMode && (
+            <>
+              {/* Partial completion controls */}
+              <div className="flex items-center gap-2">
+                <input
+                  id="partial-checkbox"
+                  type="checkbox"
+                  checked={isPartial}
+                  onChange={(e) => {
+                    setIsPartial(e.target.checked);
+                    if (!e.target.checked) {
+                      setPartialMinutes("");
+                    }
+                  }}
+                  className="h-4 w-4 rounded border-stone-300 text-stone-700 focus:ring-stone-500"
+                />
+                <label
+                  htmlFor="partial-checkbox"
+                  className="text-sm font-medium text-stone-700"
+                >
+                  Partial Chore Completion
+                </label>
+              </div>
+
+              {isPartial && selectedChoreObj && (
+                <div>
+                  <label className="block text-sm font-medium text-stone-700 mb-2">
+                    Minutes completed (up to {selectedChoreObj.minutes} min)
+                  </label>
+                  <select
+                    value={partialMinutes}
+                    onChange={(e) => setPartialMinutes(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+                  >
+                    <option value="">Select minutes...</option>
+                    {getMinuteOptions().map((m) => (
+                      <option key={m} value={m}>
+                        {m} min
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Who was this chore for? */}
+              {shouldShowForPersonDropdown && (
+                <div>
+                  <label className="block text-sm font-medium text-stone-700 mb-2">
+                    Who was this chore for?
+                  </label>
+                  <select
+                    value={forPersonId}
+                    onChange={(e) => setForPersonId(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+                  >
+                    <option value="">Select person...</option>
+                    {assignedPeopleForChore
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map((person) => (
+                        <option key={person.id} value={person.id}>
+                          {person.name}
+                        </option>
+                      ))}
+                  </select>
+                  {isCrossPerson && (
+                    <p className="mt-1 text-xs text-stone-500">
+                      This will credit{" "}
+                      {people.find((p) => p.id === forPersonId)?.name ||
+                        "this person"}
+                      's stats
+                      {isNewDebt ? " (provisional until debt is paid)" : ""}
+                      {isPayment && (
+                        <>
+                          . There are existing open debts where{" "}
+                          {people.find((p) => p.id === selectedPerson)?.name}{" "}
+                          owes {people.find((p) => p.id === forPersonId)?.name}.
+                          This completion will automatically pay down the oldest
+                          debts first.
+                        </>
+                      )}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Due date for new debts */}
+              {!isCommunityMode && isNewDebt && (
+                <div>
+                  <label className="block text-sm font-medium text-stone-700 mb-2">
+                    Due date for this favor
+                  </label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
+                  />
+                  <p className="mt-1 text-xs text-stone-500">
+                    This is when the person you did this for should pay you back
+                    by.
+                  </p>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -973,14 +1177,16 @@ function RecordChoreModal({
           <button
             onClick={handleSave}
             disabled={
-              !selectedPerson ||
-              !selectedChore ||
               saving ||
-              (isPartial && !partialMinutes) ||
-              (isNewDebt && !dueDate) ||
-              // If the person who did the chore is not assigned this chore,
-              // require that the user explicitly choose who it was for.
-              (shouldShowForPersonDropdown && !forPersonId)
+              (isCommunityMode
+                ? !selectedPerson ||
+                  !selectedCommunityChoreType ||
+                  !communityMinutes
+                : !selectedPerson ||
+                  !selectedChore ||
+                  (isPartial && !partialMinutes) ||
+                  (isNewDebt && !dueDate) ||
+                  (shouldShowForPersonDropdown && !forPersonId))
             }
             className="flex-1 px-4 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -1003,6 +1209,7 @@ function AnalysisView({
   setCurrentMonth,
   feeSettings,
   monthlyFees,
+  communityChoreTypes,
   db,
 }) {
   const [selectedTab, setSelectedTab] = useState("individual");
@@ -1236,6 +1443,102 @@ function AnalysisView({
     return { expectedMinutes, completedMinutes, percentage, choreBreakdown };
   };
 
+  // Calculate community stats for a person
+  const calculatePersonCommunityStats = (
+    personId,
+    monthFilter: string | null = null
+  ) => {
+    const communityCompletions = completions.filter((c) => {
+      if (c.type !== "community") return false;
+      if (c.completedBy !== personId) return false;
+      if (monthFilter && !c.date.startsWith(monthFilter)) return false;
+      return true;
+    });
+
+    const totalMinutes = communityCompletions.reduce(
+      (sum, c) => sum + c.minutes,
+      0
+    );
+
+    // Breakdown by type
+    const breakdownByType = {};
+    communityCompletions.forEach((c) => {
+      const typeName =
+        communityChoreTypes.find((t) => t.id === c.communityChoreTypeId)
+          ?.name || "Unknown";
+      breakdownByType[typeName] = (breakdownByType[typeName] || 0) + c.minutes;
+    });
+
+    return {
+      totalMinutes,
+      breakdownByType,
+      thisMonthMinutes: monthFilter ? totalMinutes : undefined,
+      allTimeMinutes: monthFilter ? undefined : totalMinutes,
+    };
+  };
+
+  // Calculate house-wide community stats
+  const calculateHouseCommunityStats = (monthFilter: string | null = null) => {
+    const communityCompletions = completions.filter((c) => {
+      if (c.type !== "community") return false;
+      if (monthFilter && !c.date.startsWith(monthFilter)) return false;
+      return true;
+    });
+
+    const totalMinutes = communityCompletions.reduce(
+      (sum, c) => sum + c.minutes,
+      0
+    );
+
+    // Per-person contributions
+    const perPerson = {};
+    communityCompletions.forEach((c) => {
+      perPerson[c.completedBy] = (perPerson[c.completedBy] || 0) + c.minutes;
+    });
+
+    const topContributors = Object.entries(perPerson)
+      .map(([personId, minutes]) => ({
+        personId,
+        minutes,
+        name: people.find((p) => p.id === personId)?.name || "Unknown",
+      }))
+      .sort((a, b) => b.minutes - a.minutes)
+      .slice(0, 5); // Top 5
+
+    return {
+      totalMinutes,
+      contributors: Object.keys(perPerson).length,
+      topContributors,
+    };
+  };
+
+  // Calculate community chore credit for a person in a month
+  const calculateCommunityChoreCredit = (personId, monthKey, settings) => {
+    if (!settings || !settings.communityCreditTiers) return 0;
+
+    const stats = calculatePersonCommunityStats(personId, monthKey);
+    const totalMinutes = stats.totalMinutes;
+
+    const tiers = settings.communityCreditTiers || [
+      { min: 0, credit: 0 },
+      { min: 30, credit: 5 },
+      { min: 60, credit: 10 },
+      { min: 90, credit: 15 },
+      { min: 120, credit: 20 },
+    ];
+
+    // Find the highest tier the person qualifies for
+    let credit = 0;
+    for (let i = tiers.length - 1; i >= 0; i--) {
+      if (totalMinutes >= tiers[i].min) {
+        credit = tiers[i].credit;
+        break;
+      }
+    }
+
+    return credit;
+  };
+
   const getDebtStatus = (debt) => {
     const remaining = debt.remainingMinutes ?? debt.originalMinutes ?? 0;
     if (remaining <= 0) return "paid";
@@ -1445,6 +1748,13 @@ function AnalysisView({
       );
       const expiredDebtFees = existingFeeForPerson?.expiredDebtFees || 0;
 
+      // Calculate community chore credit
+      const communityChoreCredit = calculateCommunityChoreCredit(
+        person.id,
+        monthKey,
+        feeSettings
+      );
+
       const totalFee = baseFee + expiredDebtFees;
 
       // Find or create monthly fee record
@@ -1458,6 +1768,7 @@ function AnalysisView({
         baseFee,
         expiredDebtFees,
         totalFee,
+        communityChoreCredit,
         calculatedAt: new Date().toISOString(),
         processed: existingFee?.processed || false,
       };
@@ -1513,6 +1824,11 @@ function AnalysisView({
             feeResult.targetMonthKey
           );
           const baseFee = calculateBaseFee(stats.percentage, feeSettings);
+          const communityChoreCredit = calculateCommunityChoreCredit(
+            feeResult.personId,
+            feeResult.targetMonthKey,
+            feeSettings
+          );
           const feeId = generateId();
           await setDoc(doc(db, "monthlyFees", feeId), {
             id: feeId,
@@ -1521,6 +1837,7 @@ function AnalysisView({
             baseFee,
             expiredDebtFees: feeResult.delta,
             totalFee: baseFee + feeResult.delta,
+            communityChoreCredit,
             calculatedAt: new Date().toISOString(),
             processed: false,
           });
@@ -1625,6 +1942,14 @@ function AnalysisView({
             const allTimeStats = calculatePersonStatsWithoutExpiredDebts(
               person.id
             );
+            const monthCommunityStats = calculatePersonCommunityStats(
+              person.id,
+              monthKey
+            );
+            const allTimeCommunityStats = calculatePersonCommunityStats(
+              person.id,
+              null
+            );
 
             return (
               <div
@@ -1673,6 +1998,67 @@ function AnalysisView({
                               </span>
                             </div>
                           )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Community Chores Section */}
+                  {(monthCommunityStats.totalMinutes > 0 ||
+                    allTimeCommunityStats.totalMinutes > 0) && (
+                    <div className="border-t border-stone-200 pt-4 mt-4">
+                      <h4 className="text-sm font-semibold text-cyan-700 mb-3">
+                        Community Chores
+                      </h4>
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-xs text-stone-500">
+                            Total Minutes
+                          </p>
+                          <p className="text-sm font-medium text-stone-700">
+                            {allTimeCommunityStats.totalMinutes} min
+                          </p>
+                        </div>
+                        {monthCommunityStats.thisMonthMinutes !== undefined && (
+                          <div>
+                            <p className="text-xs text-stone-500">This Month</p>
+                            <p className="text-sm font-medium text-stone-700">
+                              {monthCommunityStats.thisMonthMinutes} min
+                            </p>
+                          </div>
+                        )}
+                        {allTimeCommunityStats.allTimeMinutes !== undefined && (
+                          <div>
+                            <p className="text-xs text-stone-500">All-Time</p>
+                            <p className="text-sm font-medium text-stone-700">
+                              {allTimeCommunityStats.allTimeMinutes} min
+                            </p>
+                          </div>
+                        )}
+                        {Object.keys(allTimeCommunityStats.breakdownByType)
+                          .length > 0 && (
+                          <div className="mt-3 pt-3 border-t border-stone-100">
+                            <p className="text-xs text-stone-500 mb-2">
+                              Breakdown by Type:
+                            </p>
+                            <div className="space-y-1">
+                              {Object.entries(
+                                allTimeCommunityStats.breakdownByType
+                              ).map(([type, mins]) => (
+                                <div
+                                  key={type}
+                                  className="flex justify-between text-xs"
+                                >
+                                  <span className="text-stone-600">
+                                    • {type}
+                                  </span>
+                                  <span className="text-stone-800 font-medium">
+                                    {mins} min
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1853,6 +2239,70 @@ function AnalysisView({
               );
             })()}
           </div>
+
+          {/* Community Chores Section */}
+          <div className="bg-white rounded-2xl card-shadow p-6 max-w-2xl mx-auto">
+            <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+              Community Chores
+            </h3>
+            {(() => {
+              const monthCommunityStats =
+                calculateHouseCommunityStats(monthKey);
+              const allTimeCommunityStats = calculateHouseCommunityStats(null);
+
+              return (
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-sm text-stone-500">Total Minutes</p>
+                    <p className="text-2xl font-semibold text-stone-800">
+                      {allTimeCommunityStats.totalMinutes} min
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-stone-500">This Month</p>
+                    <p className="text-xl font-medium text-stone-700">
+                      {monthCommunityStats.totalMinutes} min
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-stone-500">Contributors</p>
+                    <p className="text-lg font-medium text-stone-700">
+                      {monthCommunityStats.contributors} people
+                    </p>
+                  </div>
+                  {monthCommunityStats.topContributors.length > 0 && (
+                    <div className="border-t border-stone-200 pt-4 mt-4">
+                      <p className="text-sm font-medium text-stone-700 mb-3">
+                        Top Contributors (This Month):
+                      </p>
+                      <div className="space-y-2">
+                        {monthCommunityStats.topContributors.map(
+                          (contributor, idx) => (
+                            <div
+                              key={contributor.personId}
+                              className="flex items-center justify-between p-3 bg-stone-50 rounded-xl"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="text-stone-500 font-medium">
+                                  {idx + 1}.
+                                </span>
+                                <span className="font-medium text-stone-800">
+                                  {contributor.name}
+                                </span>
+                              </div>
+                              <span className="text-stone-700 font-medium">
+                                {contributor.minutes} min
+                              </span>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
         </div>
       )}
 
@@ -2011,6 +2461,99 @@ function AnalysisView({
                   (except the current month) so the averages aren&apos;t skewed
                   by missing data.
                 </p>
+
+                {/* Community Chores History Table */}
+                <div className="bg-white rounded-2xl card-shadow overflow-hidden mt-6">
+                  <h3 className="font-display text-lg font-semibold text-stone-800 p-4 border-b border-stone-200">
+                    Community Chores History
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="bg-stone-50 border-b border-stone-200">
+                          <th className="text-left p-4 font-semibold text-stone-700 sticky left-0 bg-stone-50">
+                            Person
+                          </th>
+                          {historyMonthsToShow.map((m) => (
+                            <th
+                              key={m.key}
+                              className="text-center p-4 font-semibold text-stone-700 min-w-24"
+                            >
+                              {m.label}
+                            </th>
+                          ))}
+                          <th className="text-center p-4 font-semibold text-stone-700 min-w-28 bg-cyan-50">
+                            Total
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {people.map((person) => {
+                          const monthData = historyMonthsToShow.map((m) =>
+                            calculatePersonCommunityStats(person.id, m.key)
+                          );
+                          const totalMinutes = monthData.reduce(
+                            (sum, m) => sum + m.totalMinutes,
+                            0
+                          );
+
+                          return (
+                            <tr
+                              key={person.id}
+                              className="border-b border-stone-100 hover:bg-stone-50/50"
+                            >
+                              <td className="p-4 font-medium text-stone-800 sticky left-0 bg-white">
+                                {person.name}
+                              </td>
+                              {monthData.map((stats, mIdx) => (
+                                <td key={mIdx} className="p-4 text-center">
+                                  <span className="text-stone-800 font-medium">
+                                    {stats.totalMinutes} min
+                                  </span>
+                                </td>
+                              ))}
+                              <td className="p-4 text-center bg-cyan-50/50">
+                                <span className="text-stone-800 font-bold">
+                                  {totalMinutes} min
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {/* Total row */}
+                        <tr className="border-t-2 border-stone-300 bg-stone-50">
+                          <td className="p-4 font-semibold text-stone-800 sticky left-0 bg-stone-50">
+                            Total
+                          </td>
+                          {historyMonthsToShow.map((m) => {
+                            const monthStats = calculateHouseCommunityStats(
+                              m.key
+                            );
+                            return (
+                              <td key={m.key} className="p-4 text-center">
+                                <span className="text-stone-800 font-semibold">
+                                  {monthStats.totalMinutes} min
+                                </span>
+                              </td>
+                            );
+                          })}
+                          <td className="p-4 text-center bg-cyan-50">
+                            <span className="text-stone-800 font-bold">
+                              {historyMonthsToShow.reduce(
+                                (sum, m) =>
+                                  sum +
+                                  calculateHouseCommunityStats(m.key)
+                                    .totalMinutes,
+                                0
+                              )}{" "}
+                              min
+                            </span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </>
             );
           })()}
@@ -2318,6 +2861,9 @@ function AnalysisView({
                           Expired Debt Fees
                         </th>
                         <th className="text-center p-4 font-semibold text-stone-700">
+                          Community Chore Credit
+                        </th>
+                        <th className="text-center p-4 font-semibold text-stone-700">
                           Total
                         </th>
                         <th className="text-center p-4 font-semibold text-stone-700">
@@ -2367,7 +2913,13 @@ function AnalysisView({
                           // Note: Full calculation requires processing expired debts, which happens via processExpiredDebts
                           // For display purposes, we'll show 0 if not yet calculated
 
-                          const totalFee = baseFee + expiredDebtFees;
+                          const communityCredit = calculateCommunityChoreCredit(
+                            person.id,
+                            monthKey,
+                            feeSettings
+                          );
+                          const totalFee =
+                            baseFee + expiredDebtFees - communityCredit;
 
                           return (
                             <tr
@@ -2392,6 +2944,9 @@ function AnalysisView({
                               </td>
                               <td className="p-4 text-center text-stone-600">
                                 $0.00
+                              </td>
+                              <td className="p-4 text-center text-green-600 font-medium">
+                                ${communityCredit.toFixed(2)}
                               </td>
                               <td
                                 className={`p-4 text-center font-semibold ${
@@ -2438,6 +2993,16 @@ function AnalysisView({
                               (d) => !d.feeCalculated
                             );
 
+                          const communityCredit =
+                            monthlyFee.communityChoreCredit ||
+                            calculateCommunityChoreCredit(
+                              person.id,
+                              monthKey,
+                              feeSettings
+                            );
+                          const actualTotal =
+                            monthlyFee.totalFee - communityCredit;
+
                           return (
                             <tr
                               key={person.id}
@@ -2474,15 +3039,18 @@ function AnalysisView({
                                   </span>
                                 )}
                               </td>
+                              <td className="p-4 text-center text-green-600 font-medium">
+                                ${communityCredit.toFixed(2)}
+                              </td>
                               <td
                                 className={`p-4 text-center font-semibold ${
-                                  monthlyFee.totalFee < 0
+                                  actualTotal < 0
                                     ? "text-green-600"
                                     : "text-red-600"
                                 }`}
                               >
-                                {monthlyFee.totalFee < 0 ? "-" : ""}$
-                                {Math.abs(monthlyFee.totalFee).toFixed(2)}
+                                {actualTotal < 0 ? "-" : ""}$
+                                {Math.abs(actualTotal).toFixed(2)}
                               </td>
                               <td className="p-4 text-center">
                                 <span
@@ -2662,7 +3230,14 @@ function ProgressRing({ percentage, size = 64, strokeWidth = 4 }) {
 }
 
 // Admin View Component
-function AdminView({ people, chores, assignments, feeSettings, db }) {
+function AdminView({
+  people,
+  chores,
+  assignments,
+  feeSettings,
+  communityChoreTypes,
+  db,
+}) {
   const [activeSection, setActiveSection] = useState("people");
   const [rewardThreshold, setRewardThreshold] = useState(
     feeSettings?.rewardThreshold || 90
@@ -2681,6 +3256,9 @@ function AdminView({ people, chores, assignments, feeSettings, db }) {
       setRewardThreshold(feeSettings.rewardThreshold || 90);
       setRewardAmount(feeSettings.rewardAmount || 20);
       setPenaltyModifier(feeSettings.penaltyModifier || 1.0);
+      if (feeSettings.communityCreditTiers) {
+        setCommunityCreditTiers(feeSettings.communityCreditTiers);
+      }
     }
   }, [feeSettings]);
   const [newPersonName, setNewPersonName] = useState("");
@@ -2693,6 +3271,17 @@ function AdminView({ people, chores, assignments, feeSettings, db }) {
   const [timesPerMonth, setTimesPerMonth] = useState("");
   const [isDaySpecific, setIsDaySpecific] = useState(false);
   const [dayOfWeek, setDayOfWeek] = useState("");
+  const [newCommunityChoreTypeName, setNewCommunityChoreTypeName] =
+    useState("");
+  const [communityCreditTiers, setCommunityCreditTiers] = useState(
+    feeSettings?.communityCreditTiers || [
+      { min: 0, credit: 0 },
+      { min: 30, credit: 5 },
+      { min: 60, credit: 10 },
+      { min: 90, credit: 15 },
+      { min: 120, credit: 20 },
+    ]
+  );
 
   const dayNamesLong = [
     "Sunday",
@@ -2798,6 +3387,21 @@ function AdminView({ people, chores, assignments, feeSettings, db }) {
     await deleteDoc(doc(db, "assignments", id));
   };
 
+  const addCommunityChoreType = async () => {
+    if (!newCommunityChoreTypeName.trim()) return;
+    const id = generateId();
+    await setDoc(doc(db, "communityChoreTypes", id), {
+      id,
+      name: newCommunityChoreTypeName.trim(),
+      createdAt: new Date().toISOString(),
+    });
+    setNewCommunityChoreTypeName("");
+  };
+
+  const deleteCommunityChoreType = async (id) => {
+    await deleteDoc(doc(db, "communityChoreTypes", id));
+  };
+
   return (
     <div className="fade-in">
       <h2 className="font-display text-3xl font-semibold text-stone-800 mb-8">
@@ -2811,6 +3415,7 @@ function AdminView({ people, chores, assignments, feeSettings, db }) {
           { id: "chores", label: "Chores" },
           { id: "assignments", label: "Assignments" },
           { id: "feeSettings", label: "Fee Settings" },
+          { id: "communityChores", label: "Community Chores" },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -3216,6 +3821,9 @@ function AdminView({ people, chores, assignments, feeSettings, db }) {
                   rewardThreshold,
                   rewardAmount,
                   penaltyModifier,
+                  communityCreditTiers: communityCreditTiers.sort(
+                    (a, b) => a.min - b.min
+                  ),
                   lastUpdated: new Date().toISOString(),
                 };
                 await setDoc(doc(db, "feeSettings", "settings"), settingsData);
@@ -3226,6 +3834,191 @@ function AdminView({ people, chores, assignments, feeSettings, db }) {
             >
               {savingSettings ? "Saving..." : "Save Settings"}
             </button>
+          </div>
+
+          {/* Community Chore Credit Settings */}
+          <div className="mt-8 pt-8 border-t border-stone-200">
+            <h4 className="font-display text-lg font-semibold text-stone-800 mb-4">
+              Community Chore Credit Settings
+            </h4>
+            <p className="text-sm text-stone-600 mb-4">
+              Set credit tiers based on total community minutes completed per
+              month. Credits are fixed amounts per minute range.
+            </p>
+
+            <div className="space-y-3 mb-4">
+              {communityCreditTiers
+                .sort((a, b) => a.min - b.min)
+                .map((tier, index) => (
+                  <div
+                    key={index}
+                    className="flex items-center gap-3 p-3 bg-stone-50 rounded-xl"
+                  >
+                    <div className="flex-1 grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-stone-700 mb-1">
+                          Min Minutes
+                        </label>
+                        <input
+                          type="number"
+                          value={tier.min}
+                          onChange={(e) => {
+                            const newTiers = [...communityCreditTiers];
+                            newTiers[index] = {
+                              ...newTiers[index],
+                              min: parseInt(e.target.value) || 0,
+                            };
+                            setCommunityCreditTiers(newTiers);
+                          }}
+                          min="0"
+                          className="w-full px-3 py-2 rounded-lg border border-stone-200 bg-white text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-stone-700 mb-1">
+                          Credit ($)
+                        </label>
+                        <input
+                          type="number"
+                          value={tier.credit}
+                          onChange={(e) => {
+                            const newTiers = [...communityCreditTiers];
+                            newTiers[index] = {
+                              ...newTiers[index],
+                              credit: parseFloat(e.target.value) || 0,
+                            };
+                            setCommunityCreditTiers(newTiers);
+                          }}
+                          min="0"
+                          step="0.01"
+                          className="w-full px-3 py-2 rounded-lg border border-stone-200 bg-white text-sm"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (communityCreditTiers.length > 1) {
+                          const newTiers = communityCreditTiers.filter(
+                            (_, i) => i !== index
+                          );
+                          setCommunityCreditTiers(newTiers);
+                        }
+                      }}
+                      disabled={communityCreditTiers.length <= 1}
+                      className="p-2 text-stone-400 hover:text-red-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <svg
+                        className="w-5 h-5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+            </div>
+
+            <button
+              onClick={() => {
+                const newTiers = [...communityCreditTiers];
+                newTiers.push({ min: 0, credit: 0 });
+                setCommunityCreditTiers(newTiers);
+              }}
+              className="mb-4 px-4 py-2 rounded-lg border border-stone-300 text-stone-700 text-sm font-medium hover:bg-stone-50 transition-colors"
+            >
+              + Add Tier
+            </button>
+
+            <div className="bg-stone-50 rounded-xl p-4">
+              <p className="text-sm font-medium text-stone-700 mb-2">
+                Example Calculation:
+              </p>
+              <p className="text-xs text-stone-600">
+                If someone completes 60 minutes of community chores in a month,
+                they earn $
+                {communityCreditTiers
+                  .sort((a, b) => b.min - a.min)
+                  .find((tier) => 60 >= tier.min)?.credit || 0}{" "}
+                credit (based on the highest tier they qualify for).
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Community Chores Section */}
+      {activeSection === "communityChores" && (
+        <div className="bg-white rounded-2xl card-shadow p-6">
+          <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+            Community Chore Types
+          </h3>
+          <p className="text-sm text-stone-600 mb-6">
+            Community chores are unassigned chores that anyone can do. Minutes
+            are entered when recording the completion.
+          </p>
+
+          {/* Add Community Chore Type */}
+          <div className="flex gap-3 mb-6">
+            <input
+              type="text"
+              value={newCommunityChoreTypeName}
+              onChange={(e) => setNewCommunityChoreTypeName(e.target.value)}
+              placeholder="Enter community chore type name..."
+              className="flex-1 px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+              onKeyPress={(e) => e.key === "Enter" && addCommunityChoreType()}
+            />
+            <button
+              onClick={addCommunityChoreType}
+              className="px-6 py-3 rounded-xl btn-primary text-white font-medium"
+            >
+              Add
+            </button>
+          </div>
+
+          {/* Community Chore Types List */}
+          <div className="space-y-2">
+            {[...communityChoreTypes]
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((type) => (
+                <div
+                  key={type.id}
+                  className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
+                >
+                  <span className="font-medium text-stone-800">
+                    {type.name}
+                  </span>
+                  <button
+                    onClick={() => deleteCommunityChoreType(type.id)}
+                    className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+                  >
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            {communityChoreTypes.length === 0 && (
+              <p className="text-center py-8 text-stone-500">
+                No community chore types added yet.
+              </p>
+            )}
           </div>
         </div>
       )}

@@ -1,6 +1,6 @@
 # Chore Tracker
 
-A chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions. This application provides a calendar-based interface for recording chore completions, tracks individual and household performance metrics, and models chore debts as first-class records when someone does a chore for someone else.
+A chore tracking application with Firebase backend, designed to help households track and manage chore assignments and completions. This application provides a calendar-based interface for recording chore completions, tracks individual and household performance metrics, models chore debts as first-class records when someone does a chore for someone else, and includes a separate Community Chores system for unassigned chores that anyone can do.
 
 **Key Feature: Credit Assignment System**
 - When someone does a chore for another person, the **credit goes to the person the chore was done FOR**, not the person who did it
@@ -29,6 +29,7 @@ The application was built to fulfill the following requirements:
 - **Calendar View**: Visual calendar showing completed chores with color-coded dots for each person
   - Credits are assigned to the person the chore was done FOR (not the doer)
   - Provisional credits are visually indicated with dashed borders
+  - **Community Chores**: Displayed with square badges in teal/cyan color (vs circular dots for individual chores)
 - **Analysis Dashboard**:
   - Individual performance tracking with monthly breakdowns
   - **Adjusted Stats**: Toggle to view stats excluding expired debt credits
@@ -48,12 +49,21 @@ The application was built to fulfill the following requirements:
   - Automatic retroactive stats adjustment when debts expire
 - **Admin Panel**: Manage people, chores, and assignments
   - **Fee Settings**: Configure reward thresholds, reward amounts, and penalty modifiers
+  - **Community Chore Types**: Manage types/categories of community chores (e.g., "Yard Work", "Deep Clean")
+  - **Community Credit Tiers**: Configure tiered credit system for community chores (fixed credits per minute range)
 - **Day-Specific Chores**: Optional day-of-week assignments for recurring weekly chores
 - **Fees & Credits System**: Automated calculation of monthly fees and credits
   - Rewards for high completion percentages (default: 90%+ = $20 credit)
   - Penalties for low completion percentages (default: $1 per percentage point below 100%)
   - Retroactive fee adjustments when debts expire
   - Monthly fee tracking for rent calculation
+- **Community Chores System**: Separate tracking for unassigned chores that anyone can do
+  - Community chores do NOT count toward individual completion percentages
+  - Community chores do NOT count toward house-wide completion percentages
+  - Tracked separately as "Community Chore Minutes"
+  - Tiered credit system based on total minutes completed per month (configurable tiers)
+  - Default credit tiers: 0-29 min = $0, 30-59 = $5, 60-89 = $10, 90-119 = $15, 120+ = $20
+  - Credits reduce total fees owed (community credit is subtracted from total fee)
 
 ## Architecture
 
@@ -79,7 +89,7 @@ All data is stored in Firebase Firestore and synchronized in real-time using `on
 
 ### Firebase Collections
 
-The application uses eight Firestore collections:
+The application uses nine Firestore collections:
 
 #### 1. `people` Collection
 
@@ -145,33 +155,45 @@ interface Assignment {
 
 #### 4. `completions` Collection
 
-Stores records of completed chores.
+Stores records of completed chores (both individual and community).
 
 ```typescript
 interface Completion {
   id: string;           // Unique identifier (generated)
   date: string;         // Date in "YYYY-MM-DD" format
   completedBy: string;  // Reference to person.id (who did the chore)
-  choreId: string;      // Reference to chore.id (which chore was done)
+  choreId: string;      // Reference to chore.id (which chore was done) - only for individual completions
   minutes: number;      // Minutes recorded for this completion (full or partial)
   createdAt: string;    // ISO timestamp of when the record was created
-  forPersonId: string | null; // Reference to person.id this chore was done for (can be same as completedBy)
-  isProvisional?: boolean;    // true if this completion created a debt that hasn't been paid/expired
-  sourceDebtId?: string;      // If this completion created a debt, reference it
+  type?: "individual" | "community";  // Defaults to "individual" for backward compatibility
+  forPersonId: string | null; // Reference to person.id this chore was done for (only for individual completions)
+  isProvisional?: boolean;    // true if this completion created a debt that hasn't been paid/expired (only for individual)
+  sourceDebtId?: string;      // If this completion created a debt, reference it (only for individual)
+  communityChoreTypeId?: string;  // Reference to communityChoreType.id (only for community completions)
 }
 ```
 
 **Key Behaviors:**
 
-- **Credit Assignment**: Credits go to `forPersonId` (not `completedBy`) for cross-person completions. This means when Person A does a chore for Person B, Person B gets the credit toward their stats.
-- **Provisional Credits**: When a cross-person completion creates a new debt, the credit is marked as "provisional" until the debt is paid or expires.
-- **Self-Completions**: If `forPersonId === completedBy`, credit goes to `completedBy` (normal behavior).
+- **Type Field**: `type` field distinguishes individual vs community completions (defaults to "individual" for backward compatibility)
+- **Individual Completions** (`type === "individual"` or undefined):
+  - **Credit Assignment**: Credits go to `forPersonId` (not `completedBy`) for cross-person completions. This means when Person A does a chore for Person B, Person B gets the credit toward their stats.
+  - **Provisional Credits**: When a cross-person completion creates a new debt, the credit is marked as "provisional" until the debt is paid or expires.
+  - **Self-Completions**: If `forPersonId === completedBy`, credit goes to `completedBy` (normal behavior).
+- **Community Completions** (`type === "community"`):
+  - Do NOT count toward individual completion percentages
+  - Do NOT count toward house-wide completion percentages
+  - Tracked separately as "Community Chore Minutes"
+  - `choreId` may be empty/null (or could reference a placeholder)
+  - `forPersonId` is always null (no cross-person tracking)
+  - `isProvisional` and `sourceDebtId` are always undefined
+  - `communityChoreTypeId` must be present
 
 **Operations:**
 
-- Create: Record completion via calendar day click
+- Create: Record completion via calendar day click (supports both individual and community modes)
 - Read: Real-time listener syncs all completions
-- Update: `isProvisional` is set to `false` when the associated debt is fully paid
+- Update: `isProvisional` is set to `false` when the associated debt is fully paid (individual only)
 - Delete: Not currently implemented in UI (would require manual Firestore deletion)
 
 #### 5. `debts` Collection
@@ -229,7 +251,7 @@ interface DebtPayment {
 
 #### 7. `feeSettings` Collection (Singleton)
 
-Stores global fee and credit configuration settings.
+Stores global fee and credit configuration settings for both individual and community chores.
 
 ```typescript
 interface FeeSettings {
@@ -237,15 +259,32 @@ interface FeeSettings {
   rewardThreshold: number;  // Completion % to get reward (default: 90)
   rewardAmount: number;     // Dollar amount of reward (default: 20)
   penaltyModifier: number;  // Multiplier for penalty calculation (default: 1.0)
+  communityCreditTiers: Array<{ min: number; credit: number }>;  // Tiered credit system for community chores
   lastUpdated: string;      // ISO timestamp
 }
 ```
+
+**Community Credit Tiers:**
+
+Default tier structure:
+```typescript
+[
+  { min: 0, credit: 0 },
+  { min: 30, credit: 5 },
+  { min: 60, credit: 10 },
+  { min: 90, credit: 15 },
+  { min: 120, credit: 20 }
+]
+```
+
+Tiers are sorted by `min` in ascending order. Credits are calculated by finding the highest tier the person qualifies for based on their total community minutes in the month.
 
 **Operations:**
 
 - Read: Load once on app start, real-time listener syncs changes
 - Update: Admin can modify in Admin panel (Fee Settings tab)
-- Initialize: If no document exists, defaults are used (90% threshold, $20 reward, 1.0 modifier)
+- Initialize: If no document exists, defaults are used (90% threshold, $20 reward, 1.0 modifier, default community tiers)
+- Migration: If `communityCreditTiers` is missing from existing settings, it's automatically initialized with defaults
 
 #### 8. `monthlyFees` Collection
 
@@ -258,7 +297,8 @@ interface MonthlyFee {
   monthKey: string;          // "YYYY-MM" format
   baseFee: number;           // Fee from completion % (can be negative for credits)
   expiredDebtFees: number;   // Additional fees from expired debts
-  totalFee: number;          // baseFee + expiredDebtFees (for convenience)
+  totalFee: number;          // baseFee + expiredDebtFees (for convenience, before community credit)
+  communityChoreCredit: number; // Credit from community chores (always positive or 0)
   calculatedAt: string;      // ISO timestamp when this was calculated
   processed: boolean;        // true when rent has been calculated and this can be hidden
 }
@@ -268,6 +308,8 @@ interface MonthlyFee {
 
 - **Base Fee**: Calculated from monthly completion percentage using fee formula
 - **Expired Debt Fees**: Accumulated retroactive fees when debts expire
+- **Community Chore Credit**: Calculated from tiered credit system based on total community minutes
+- **Actual Total**: The actual total fee owed is `totalFee - communityChoreCredit` (community credits reduce fees)
 - **Processing Status**: `processed: true` marks fees as applied to rent (for treasurer workflow)
 - **Historical Preservation**: All records are kept for running tallies, never deleted
 
@@ -279,19 +321,48 @@ interface MonthlyFee {
   - Recalculated when "Recalculate" button is clicked
   - `processed` flag updated when treasurer marks as processed
   - `expiredDebtFees` updated when debts expire
+  - `communityChoreCredit` calculated and updated when fees are recalculated
 - Never delete: Keep all records for historical running tally
+
+#### 9. `communityChoreTypes` Collection
+
+Stores the types/categories of community chores that can be done.
+
+```typescript
+interface CommunityChoreType {
+  id: string;           // Unique identifier (generated)
+  name: string;         // Name of the community chore type (e.g., "Yard Work", "Deep Clean", "Organizing")
+  createdAt: string;    // ISO timestamp
+}
+```
+
+**Key Behaviors:**
+
+- Unlike regular chores, community chore types don't have a fixed `minutes` value
+- Minutes are entered directly when recording the completion
+- Deleting a community chore type does NOT delete completions (they become "orphaned" and show as "Unknown")
+
+**Operations:**
+
+- Create: Add new community chore type via Admin panel (Community Chores tab)
+- Read: Real-time listener syncs all community chore types
+- Delete: Removes community chore type (does NOT delete completions, but they become orphaned)
 
 ### Data Relationships
 
 ```text
 Person (1) ──< (many) Assignment (many) >── (1) Chore
-Person (1) ──< (many) Completion (many) >── (1) Chore
+Person (1) ──< (many) Completion (many) >── (1) Chore (individual completions)
+Person (1) ──< (many) Completion (many) >── (1) CommunityChoreType (community completions)
 ```
 
 - One person can have many assignments
 - One chore can be assigned to many people
-- One person can complete many chores
-- One chore can be completed many times
+- One person can complete many chores (individual)
+- One chore can be completed many times (individual)
+- One person can complete many community chores
+- One community chore type can be completed many times
+- Community completions are independent of assignments and don't create debts
 
 ## Business Logic & Calculations
 
@@ -485,19 +556,55 @@ When a debt expires (not fully paid by its due date), the system calculates a re
 3. **Processing Status**: After rent is calculated, treasurer can mark fees as "Processed" using the "Mark Processed" button
 4. **Running Tally**: The system maintains a running total of all fees/credits per person across all months
 
+#### Community Chore Credit Calculation
+
+Community chores use a tiered credit system based on total minutes completed in the month. There are no expectations or goals for community minutes - credits are purely reward-based.
+
+**Credit Calculation:**
+
+```typescript
+function calculateCommunityChoreCredit(personId, monthKey, feeSettings) {
+  const stats = calculatePersonCommunityStats(personId, monthKey);
+  const totalMinutes = stats.totalMinutes;
+  
+  // Find the highest tier the person qualifies for
+  const tiers = feeSettings.communityCreditTiers || defaultTiers;
+  let credit = 0;
+  for (let i = tiers.length - 1; i >= 0; i--) {
+    if (totalMinutes >= tiers[i].min) {
+      credit = tiers[i].credit;
+      break;
+    }
+  }
+  
+  return credit;
+}
+```
+
+**Default Tiers:**
+- 0-29 minutes: $0 credit
+- 30-59 minutes: $5 credit
+- 60-89 minutes: $10 credit
+- 90-119 minutes: $15 credit
+- 120+ minutes: $20 credit
+
+Tiers are configurable in the Admin panel (Fee Settings tab).
+
 #### Total Fee Calculation
 
 For each person per month:
 
 ```typescript
 totalFee = baseFee + expiredDebtFees
+actualTotalFee = totalFee - communityChoreCredit
 ```
 
 Where:
 - `baseFee`: Calculated from completion percentage (excluding expired debt credits)
 - `expiredDebtFees`: Sum of all retroactive fee adjustments from debts that expired in this month
+- `communityChoreCredit`: Credit from community chores (always positive or 0, reduces total fee)
 
-**Note:** Credits are negative values, fees are positive. Example: `-$20 (credit) + $10 (expired debt) = -$10` (still a credit, but smaller).
+**Note:** Credits are negative values, fees are positive. Example: `-$20 (credit) + $10 (expired debt) - $5 (community credit) = -$15` (net credit).
 
 #### UI Components
 
@@ -508,9 +615,10 @@ Where:
   - Completion percentage (excluding expired debt credits)
   - Base fee/credit
   - Expired debt fees
-  - Total fee/credit
+  - Community Chore Credit (new column)
+  - Total fee/credit (after subtracting community credit)
   - Status (Pending/Processed)
-- "Recalculate" button: Recalculates all fees for the selected month
+- "Recalculate" button: Recalculates all fees for the selected month (including community credits)
 - "Mark Processed" button: Marks individual fees as processed (after rent calculation)
 - Running Tally section: Shows total fees/credits per person across all months
 
@@ -546,17 +654,28 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 2. Click on any day in the calendar
 3. Modal opens showing:
    - Selected date (formatted as "Weekday, Month Day, Year")
+   - **Mode Toggle**: Switch between "Individual" and "Community" modes (top-right of modal)
+   
+   **Individual Mode (Default):**
    - Dropdown to select who did the chore
    - Dropdown to select which chore was done
    - Checkbox and selector for partial completions (optional)
    - Dropdown to select **who the chore was done for** (can be the same person)
    - If the chore is done for someone else and will create a new debt, a **due date** field is required
    - Note indicating who will receive credit (the person the chore was done for)
+   
+   **Community Mode:**
+   - Dropdown to select who did the chore
+   - Dropdown to select community chore type (e.g., "Yard Work", "Deep Clean")
+   - Number input for minutes (1-999)
+   - No debt-related fields (community chores don't create debts)
+   
 4. Click "Save" to record the completion
-5. Calendar updates in real-time with color-coded dots showing completions:
-   - Dots are colored based on who gets credit (`forPersonId`), not who did it
-   - Provisional credits are indicated with a dashed border
-   - Tooltips show completion details including provisional status
+5. Calendar updates in real-time showing completions:
+   - **Individual chores**: Circular dots colored based on who gets credit (`forPersonId`), not who did it
+   - **Community chores**: Square badges in teal/cyan color
+   - Provisional credits (individual only) are indicated with a dashed border
+   - Tooltips show completion details including provisional status (individual) or community type and minutes (community)
 
 ### 3. Viewing Analysis (Analysis View)
 
@@ -566,16 +685,25 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
    - **Individual**: See each person's stats for current month and all-time
      - Toggle "Show adjusted stats" to exclude expired debt credits
      - See both current stats (with provisional credits) and adjusted stats (without expired debts)
+     - **Community Chores Section**: Shows each person's community chore contributions
+       - Total minutes, this month, all-time
+       - Breakdown by community chore type
    - **House Total**: Aggregate statistics and chore completion status
+     - **Community Chores Section**: Shows house-wide community stats
+       - Total minutes, this month, contributors count
+       - Top contributors list
    - **History**: Multi-month table showing trends (3, 6, or 12 months)
+     - **Individual History Table**: Shows individual chore completion percentages per person per month
+     - **Community History Table**: Shows community chore minutes per person per month (new)
    - **Debts**: Per-person view of debts owed and owed-to, with per-debt details:
      - Shows expiration status (expired debts are visually distinguished)
      - Displays which completion created each debt
      - Shows expiration dates for expired debts
    - **Fees/Credits**: Monthly fee and credit tracking
      - View fees/credits for selected month
-     - See base fees, expired debt fees, and totals per person
-     - Click "Recalculate" to process expired debts and recalculate fees
+     - See base fees, expired debt fees, **community chore credits**, and totals per person
+     - Total calculation: `baseFee + expiredDebtFees - communityChoreCredit`
+     - Click "Recalculate" to process expired debts and recalculate fees (including community credits)
      - Mark fees as "Processed" after rent calculation
      - View running tally of all fees/credits per person
 
@@ -601,6 +729,7 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `showRecordModal`: Boolean for modal visibility
 - `setShowRecordModal`: Function to toggle modal
 - `assignments`: Array of all assignments
+- `communityChoreTypes`: Array of all community chore types
 - `db`: Firestore database instance
 
 **Features:**
@@ -609,10 +738,12 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - Calendar grid with day cells
 - Click handler to open record modal
 - Visual indicators for today
-- Completion dots with chore names (truncated if >10 chars)
-- **Credit Assignment**: Dots are colored based on who gets credit (`forPersonId`), not who did the chore
-- **Provisional Indicators**: Provisional credits show with a dashed border
-- **Tooltips**: Show completion details including who did it and provisional status
+- **Individual Completions**: Circular dots with chore names (truncated if >10 chars)
+  - **Credit Assignment**: Dots are colored based on who gets credit (`forPersonId`), not who did the chore
+  - **Provisional Indicators**: Provisional credits show with a dashed border
+  - **Tooltips**: Show completion details including who did it and provisional status
+- **Community Completions**: Square badges in teal/cyan color (`bg-cyan-500`)
+  - **Tooltips**: Show "Community: [Type] - [Minutes] min (by [Person])"
 
 ### RecordChoreModal Component
 
@@ -622,19 +753,29 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `chores`: Array of all chores
 - `assignments`: Array of all assignments (not currently used in modal)
 - `debts`: Array of all debts (used to determine whether a cross-person completion is a new debt or a payment)
+- `communityChoreTypes`: Array of all community chore types
 - `onClose`: Function to close modal
 - `db`: Firestore database instance
 
 **Features:**
-- Form to select:
-  - Who did the chore
-  - Which chore was done
-  - Whether it was a partial completion and how many minutes
-  - **Who the chore was done for**
-- Saves completion record to Firestore with `forPersonId`
-- Automatically:
-  - Creates a new `Debt` (with manual due date) when a favor is done for someone and no existing debts exist in that direction
-  - Applies payments oldest-first to existing debts when the debtor does a chore for the creditor
+- **Mode Toggle**: Switch between "Individual" and "Community" modes (top-right toggle)
+- **Individual Mode**:
+  - Form to select:
+    - Who did the chore
+    - Which chore was done
+    - Whether it was a partial completion and how many minutes
+    - **Who the chore was done for**
+  - Saves completion record to Firestore with `type: "individual"` and `forPersonId`
+  - Automatically:
+    - Creates a new `Debt` (with manual due date) when a favor is done for someone and no existing debts exist in that direction
+    - Applies payments oldest-first to existing debts when the debtor does a chore for the creditor
+- **Community Mode**:
+  - Form to select:
+    - Who did the chore
+    - Community chore type (dropdown)
+    - Minutes (number input, 1-999)
+  - Saves completion record to Firestore with `type: "community"` and `communityChoreTypeId`
+  - No debt logic (community chores don't create debts)
 - Formatted date display
 
 ### AnalysisView Component
@@ -657,16 +798,20 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - Chore breakdown per person
 - **Adjusted Stats Toggle**: View stats with or without expired debt credits
 - **Expired Debt Indicators**: Visual distinction for expired debts in the "Who Owes Who" tab
-- **Fees/Credits Tab**: Monthly fee tracking with base fees, expired debt fees, and running tallies
+- **Fees/Credits Tab**: Monthly fee tracking with base fees, expired debt fees, community chore credits, and running tallies
+- **Community Stats**: Separate tracking and display of community chore contributions
 
 **Key Functions:**
-- `calculatePersonStats(personId, monthFilter)`: Calculates expected, completed, percentage, and breakdown
-- `calculatePersonStatsWithoutExpiredDebts(personId, monthFilter)`: Calculates stats excluding expired debt credits
+- `calculatePersonStats(personId, monthFilter)`: Calculates expected, completed, percentage, and breakdown (individual chores only)
+- `calculatePersonStatsWithoutExpiredDebts(personId, monthFilter)`: Calculates stats excluding expired debt credits (individual chores only)
+- `calculatePersonCommunityStats(personId, monthFilter)`: Calculates community chore stats (total minutes, breakdown by type)
+- `calculateHouseCommunityStats(monthFilter)`: Calculates house-wide community stats (total minutes, contributors, top contributors)
+- `calculateCommunityChoreCredit(personId, monthKey, feeSettings)`: Calculates community credit based on tiered system
 - `calculateBaseFee(completionPercentage, feeSettings)`: Calculates base fee/credit from completion percentage
 - `calculateExpiredDebtFee(debt)`: Calculates retroactive fee adjustment for an expired debt
-- `calculateMonthlyFees(monthKey)`: Calculates and stores monthly fees for all people for a given month
+- `calculateMonthlyFees(monthKey)`: Calculates and stores monthly fees for all people for a given month (including community credits)
 - `processExpiredDebts()`: Processes all unprocessed expired debts and calculates their fees
-- `houseStats()`: Aggregates all people's stats for current month
+- `houseStats()`: Aggregates all people's stats for current month (individual chores only)
 - `getLastNMonths(n)`: Generates array of month objects for history view
 
 ### AdminView Component
@@ -678,13 +823,19 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - `db`: Firestore database instance
 
 **Features:**
-- Tab navigation (People, Chores, Assignments, Fee Settings)
+- Tab navigation (People, Chores, Assignments, Fee Settings, Community Chores)
 - CRUD operations for people
 - CRUD operations for chores
 - CRUD operations for assignments
 - Day-specific assignment option
 - Cascade delete (deleting person/chore also deletes assignments)
-- **Fee Settings**: Configure reward threshold, reward amount, and penalty modifier
+- **Fee Settings**: Configure reward threshold, reward amount, penalty modifier, and community credit tiers
+  - Community credit tiers: Add/edit/delete tiers (min minutes, credit amount)
+  - Tiers must be sorted by `min` in ascending order
+  - At least one tier must exist
+- **Community Chores**: Manage community chore types
+  - Add new community chore types (name only, no minutes)
+  - Delete community chore types (completions become orphaned but remain)
 
 ### ProgressRing Component
 
@@ -889,6 +1040,12 @@ The history view automatically filters out months where no one has any completio
 10. **Statistics Enhancements**: Charts, graphs, and trend analysis
 11. **Recurring Completions**: Mark completions as recurring to auto-populate future dates
 12. **Chore Categories**: Group chores by category (cleaning, cooking, maintenance, etc.)
+13. **Community Chore Enhancements**:
+    - Percentage-based credits instead of tiered system (if desired)
+    - Optional "suggested" community chores (not required, but tracked)
+    - Charts and graphs for community chore trends
+    - Badges/achievements for reaching community chore milestones
+    - Optional monthly targets for community chores
 
 ## License
 

@@ -61,6 +61,128 @@ const checkAndMarkExpiredDebts = async (debts, completions, db) => {
   }
 };
 
+// Helper functions for chore and assignment versioning
+// Get the chore minutes that were effective on a given date
+const getChoreMinutesAtDate = (chore, date: string): number => {
+  // If no versioning, return current minutes (backward compatible)
+  if (!chore.effectiveDate && !chore.history) {
+    return chore.minutes;
+  }
+
+  // Parse target date
+  const targetDate = new Date(date + "T12:00:00");
+
+  // Check if current version was effective on this date
+  if (chore.effectiveDate) {
+    const effectiveDate = new Date(chore.effectiveDate + "T12:00:00");
+    if (targetDate >= effectiveDate) {
+      return chore.minutes; // Current version applies
+    }
+  }
+
+  // Search history for the version that was active on this date
+  if (chore.history && chore.history.length > 0) {
+    // Sort history by effectiveDate descending (newest first)
+    const sortedHistory = [...chore.history].sort(
+      (a, b) =>
+        new Date(b.effectiveDate + "T12:00:00").getTime() -
+        new Date(a.effectiveDate + "T12:00:00").getTime()
+    );
+
+    // Find the most recent version that was effective before or on target date
+    for (const version of sortedHistory) {
+      const versionDate = new Date(version.effectiveDate + "T12:00:00");
+      if (targetDate >= versionDate) {
+        return version.minutes;
+      }
+    }
+  }
+
+  // Fallback: if no version found, use current minutes
+  return chore.minutes;
+};
+
+// Get the chore name that was effective on a given date
+const getChoreNameAtDate = (chore, date: string): string => {
+  // If no versioning, return current name (backward compatible)
+  if (!chore.effectiveDate && !chore.history) {
+    return chore.name;
+  }
+
+  // Parse target date
+  const targetDate = new Date(date + "T12:00:00");
+
+  // Check if current version was effective on this date
+  if (chore.effectiveDate) {
+    const effectiveDate = new Date(chore.effectiveDate + "T12:00:00");
+    if (targetDate >= effectiveDate) {
+      return chore.name; // Current version applies
+    }
+  }
+
+  // Search history for the version that was active on this date
+  if (chore.history && chore.history.length > 0) {
+    // Sort history by effectiveDate descending (newest first)
+    const sortedHistory = [...chore.history].sort(
+      (a, b) =>
+        new Date(b.effectiveDate + "T12:00:00").getTime() -
+        new Date(a.effectiveDate + "T12:00:00").getTime()
+    );
+
+    // Find the most recent version that was effective before or on target date
+    for (const version of sortedHistory) {
+      const versionDate = new Date(version.effectiveDate + "T12:00:00");
+      if (targetDate >= versionDate) {
+        // Return the name from history if stored, otherwise use current name
+        return version.name !== undefined ? version.name : chore.name;
+      }
+    }
+  }
+
+  // Fallback: if no version found, use current name
+  return chore.name;
+};
+
+// Get the assignment frequency that was effective on a given date
+const getAssignmentFrequencyAtDate = (assignment, date: string): number => {
+  // If no versioning, return current frequency (backward compatible)
+  if (!assignment.effectiveDate && !assignment.history) {
+    return assignment.timesPerMonth;
+  }
+
+  // Parse target date
+  const targetDate = new Date(date + "T12:00:00");
+
+  // Check if current version was effective on this date
+  if (assignment.effectiveDate) {
+    const effectiveDate = new Date(assignment.effectiveDate + "T12:00:00");
+    if (targetDate >= effectiveDate) {
+      return assignment.timesPerMonth; // Current version applies
+    }
+  }
+
+  // Search history for the version that was active on this date
+  if (assignment.history && assignment.history.length > 0) {
+    // Sort history by effectiveDate descending (newest first)
+    const sortedHistory = [...assignment.history].sort(
+      (a, b) =>
+        new Date(b.effectiveDate + "T12:00:00").getTime() -
+        new Date(a.effectiveDate + "T12:00:00").getTime()
+    );
+
+    // Find the most recent version that was effective before or on target date
+    for (const version of sortedHistory) {
+      const versionDate = new Date(version.effectiveDate + "T12:00:00");
+      if (targetDate >= versionDate) {
+        return version.timesPerMonth;
+      }
+    }
+  }
+
+  // Fallback: if no version found, use current frequency
+  return assignment.timesPerMonth;
+};
+
 // Main App Component
 export default function App() {
   const [currentView, setCurrentView] = useState("calendar");
@@ -606,7 +728,9 @@ function CalendarView({
                     const chore = chores.find(
                       (c) => c.id === completion.choreId
                     );
-                    const choreName = chore?.name || "";
+                    const choreName = chore
+                      ? getChoreNameAtDate(chore, completion.date)
+                      : "";
                     const displayName =
                       choreName.length > 10
                         ? choreName.substring(0, 10) + "..."
@@ -631,7 +755,7 @@ function CalendarView({
                         style={{
                           backgroundColor: personColors[creditPersonId],
                         }}
-                        title={`${creditPerson?.name}: ${chore?.name}${
+                        title={`${creditPerson?.name}: ${choreName}${
                           isProvisional ? " (provisional)" : ""
                         }`}
                       >
@@ -1304,14 +1428,22 @@ function AnalysisView({
 
     // Calculate expected minutes from assignments
     if (monthFilter) {
+      // For a specific month, use values effective on the first day of the month
+      const monthStartDate = monthFilter + "-01";
       personAssignments.forEach((assignment) => {
         const chore = chores.find((c) => c.id === assignment.choreId);
         if (chore) {
-          expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+          const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+          const assignmentFreq = getAssignmentFrequencyAtDate(
+            assignment,
+            monthStartDate
+          );
+          expectedMinutes += choreMinutes * assignmentFreq * 1;
         }
       });
     } else {
       if (personCompletions.length === 0) {
+        // No completions yet, default to 1 month with current values
         personAssignments.forEach((assignment) => {
           const chore = chores.find((c) => c.id === assignment.choreId);
           if (chore) {
@@ -1319,20 +1451,27 @@ function AnalysisView({
           }
         });
       } else {
+        // Count expected minutes per month, using values effective in that month
         const monthsWithCompletions = new Set();
         personCompletions.forEach((completion) => {
           const monthKey = completion.date.substring(0, 7);
           monthsWithCompletions.add(monthKey);
         });
 
-        const monthsToCount = monthsWithCompletions.size;
-
-        personAssignments.forEach((assignment) => {
-          const chore = chores.find((c) => c.id === assignment.choreId);
-          if (chore) {
-            expectedMinutes +=
-              chore.minutes * assignment.timesPerMonth * monthsToCount;
-          }
+        // For each month, calculate expected minutes using values effective in that month
+        monthsWithCompletions.forEach((monthKey) => {
+          const monthStartDate = monthKey + "-01";
+          personAssignments.forEach((assignment) => {
+            const chore = chores.find((c) => c.id === assignment.choreId);
+            if (chore) {
+              const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+              const assignmentFreq = getAssignmentFrequencyAtDate(
+                assignment,
+                monthStartDate
+              );
+              expectedMinutes += choreMinutes * assignmentFreq * 1;
+            }
+          });
         });
       }
     }
@@ -1342,8 +1481,9 @@ function AnalysisView({
       const chore = chores.find((c) => c.id === completion.choreId);
       if (chore) {
         completedMinutes += completion.minutes;
-        choreBreakdown[chore.name] =
-          (choreBreakdown[chore.name] || 0) + completion.minutes;
+        const choreNameAtDate = getChoreNameAtDate(chore, completion.date);
+        choreBreakdown[choreNameAtDate] =
+          (choreBreakdown[choreNameAtDate] || 0) + completion.minutes;
       }
     });
 
@@ -1385,11 +1525,17 @@ function AnalysisView({
 
     // Calculate expected minutes from assignments
     if (monthFilter) {
-      // For a specific month, use multiplier of 1
+      // For a specific month, use values effective on the first day of the month
+      const monthStartDate = monthFilter + "-01";
       personAssignments.forEach((assignment) => {
         const chore = chores.find((c) => c.id === assignment.choreId);
         if (chore) {
-          expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+          const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+          const assignmentFreq = getAssignmentFrequencyAtDate(
+            assignment,
+            monthStartDate
+          );
+          expectedMinutes += choreMinutes * assignmentFreq * 1;
         }
       });
     } else {
@@ -1397,7 +1543,7 @@ function AnalysisView({
       // where this person has completions. This matches how the history view
       // calculates totals by summing individual months.
       if (personCompletions.length === 0) {
-        // No completions yet, default to 1 month
+        // No completions yet, default to 1 month with current values
         personAssignments.forEach((assignment) => {
           const chore = chores.find((c) => c.id === assignment.choreId);
           if (chore) {
@@ -1405,7 +1551,7 @@ function AnalysisView({
           }
         });
       } else {
-        // Count distinct months where this person has completions
+        // Count expected minutes per month, using values effective in that month
         const monthsWithCompletions = new Set();
         personCompletions.forEach((completion) => {
           // Extract month key from date (format: "YYYY-MM-DD")
@@ -1413,14 +1559,20 @@ function AnalysisView({
           monthsWithCompletions.add(monthKey);
         });
 
-        const monthsToCount = monthsWithCompletions.size;
-
-        personAssignments.forEach((assignment) => {
-          const chore = chores.find((c) => c.id === assignment.choreId);
-          if (chore) {
-            expectedMinutes +=
-              chore.minutes * assignment.timesPerMonth * monthsToCount;
-          }
+        // For each month, calculate expected minutes using values effective in that month
+        monthsWithCompletions.forEach((monthKey) => {
+          const monthStartDate = monthKey + "-01";
+          personAssignments.forEach((assignment) => {
+            const chore = chores.find((c) => c.id === assignment.choreId);
+            if (chore) {
+              const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+              const assignmentFreq = getAssignmentFrequencyAtDate(
+                assignment,
+                monthStartDate
+              );
+              expectedMinutes += choreMinutes * assignmentFreq * 1;
+            }
+          });
         });
       }
     }
@@ -1430,8 +1582,9 @@ function AnalysisView({
       const chore = chores.find((c) => c.id === completion.choreId);
       if (chore) {
         completedMinutes += completion.minutes;
-        choreBreakdown[chore.name] =
-          (choreBreakdown[chore.name] || 0) + completion.minutes;
+        const choreNameAtDate = getChoreNameAtDate(chore, completion.date);
+        choreBreakdown[choreNameAtDate] =
+          (choreBreakdown[choreNameAtDate] || 0) + completion.minutes;
       }
     });
 
@@ -1623,14 +1776,22 @@ function AnalysisView({
     let completedMinutes = 0;
 
     if (monthFilter) {
+      // For a specific month, use values effective on the first day of the month
+      const monthStartDate = monthFilter + "-01";
       personAssignments.forEach((assignment) => {
         const chore = chores.find((c) => c.id === assignment.choreId);
         if (chore) {
-          expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+          const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+          const assignmentFreq = getAssignmentFrequencyAtDate(
+            assignment,
+            monthStartDate
+          );
+          expectedMinutes += choreMinutes * assignmentFreq * 1;
         }
       });
     } else {
       if (personCompletions.length === 0) {
+        // No completions yet, default to 1 month with current values
         personAssignments.forEach((assignment) => {
           const chore = chores.find((c) => c.id === assignment.choreId);
           if (chore) {
@@ -1638,18 +1799,26 @@ function AnalysisView({
           }
         });
       } else {
+        // Count expected minutes per month, using values effective in that month
         const monthsWithCompletions = new Set();
         personCompletions.forEach((completion) => {
           const monthKey = completion.date.substring(0, 7);
           monthsWithCompletions.add(monthKey);
         });
-        const monthsToCount = monthsWithCompletions.size;
-        personAssignments.forEach((assignment) => {
-          const chore = chores.find((c) => c.id === assignment.choreId);
-          if (chore) {
-            expectedMinutes +=
-              chore.minutes * assignment.timesPerMonth * monthsToCount;
-          }
+        // For each month, calculate expected minutes using values effective in that month
+        monthsWithCompletions.forEach((monthKey) => {
+          const monthStartDate = monthKey + "-01";
+          personAssignments.forEach((assignment) => {
+            const chore = chores.find((c) => c.id === assignment.choreId);
+            if (chore) {
+              const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+              const assignmentFreq = getAssignmentFrequencyAtDate(
+                assignment,
+                monthStartDate
+              );
+              expectedMinutes += choreMinutes * assignmentFreq * 1;
+            }
+          });
         });
       }
     }
@@ -2134,19 +2303,25 @@ function AnalysisView({
               const choreStatus = {};
 
               // Initialize with all assignments
+              const monthStartDate = monthKey + "-01";
               assignments.forEach((assignment) => {
                 const chore = chores.find((c) => c.id === assignment.choreId);
                 if (chore) {
                   if (!choreStatus[assignment.choreId]) {
                     choreStatus[assignment.choreId] = {
                       choreId: assignment.choreId,
-                      choreName: chore.name,
+                      choreName: getChoreNameAtDate(chore, monthStartDate),
                       expectedMinutes: 0,
                       completedMinutes: 0,
                     };
                   }
+                  const choreMinutes = getChoreMinutesAtDate(chore, monthStartDate);
+                  const assignmentFreq = getAssignmentFrequencyAtDate(
+                    assignment,
+                    monthStartDate
+                  );
                   choreStatus[assignment.choreId].expectedMinutes +=
-                    assignment.timesPerMonth * chore.minutes;
+                    assignmentFreq * choreMinutes;
                 }
               });
 
@@ -2700,6 +2875,14 @@ function AnalysisView({
                               const chore = chores.find(
                                 (c) => c.id === d.choreId
                               );
+                              // Get completion date to determine historical chore name
+                              const sourceCompletion = completions.find(
+                                (c) => c.id === d.sourceCompletionId
+                              );
+                              const completionDate = sourceCompletion?.date;
+                              const choreName = chore && completionDate
+                                ? getChoreNameAtDate(chore, completionDate)
+                                : chore?.name || "";
                               const remaining =
                                 d.remainingMinutes ?? d.originalMinutes ?? 0;
                               const status = getDebtStatus(d);
@@ -2711,7 +2894,7 @@ function AnalysisView({
                                   <div>
                                     <p className="text-sm font-medium text-stone-800">
                                       {debtor?.name}{" "}
-                                      {chore ? `(${chore.name})` : ""}
+                                      {choreName ? `(${choreName})` : ""}
                                     </p>
                                     <p className="text-xs text-stone-500">
                                       Remaining {remaining} min
@@ -2753,6 +2936,14 @@ function AnalysisView({
                               const chore = chores.find(
                                 (c) => c.id === d.choreId
                               );
+                              // Get completion date to determine historical chore name
+                              const sourceCompletion = completions.find(
+                                (c) => c.id === d.sourceCompletionId
+                              );
+                              const completionDate = sourceCompletion?.date;
+                              const choreName = chore && completionDate
+                                ? getChoreNameAtDate(chore, completionDate)
+                                : chore?.name || "";
                               const remaining =
                                 d.remainingMinutes ?? d.originalMinutes ?? 0;
                               const status = getDebtStatus(d);
@@ -2767,7 +2958,7 @@ function AnalysisView({
                                   <div>
                                     <p className="text-sm font-medium text-stone-800">
                                       {creditor?.name}{" "}
-                                      {chore ? `(${chore.name})` : ""}
+                                      {choreName ? `(${choreName})` : ""}
                                       {isExpired && (
                                         <span className="ml-2 text-xs text-stone-500">
                                           (Expired)
@@ -3283,6 +3474,16 @@ function AdminView({
     ]
   );
 
+  // Edit modal state
+  const [editingChore, setEditingChore] = useState(null);
+  const [editChoreName, setEditChoreName] = useState("");
+  const [editChoreMinutes, setEditChoreMinutes] = useState("");
+  const [editChoreEffectiveDate, setEditChoreEffectiveDate] = useState("");
+  const [editingAssignment, setEditingAssignment] = useState(null);
+  const [editAssignmentFrequency, setEditAssignmentFrequency] = useState("");
+  const [editAssignmentEffectiveDate, setEditAssignmentEffectiveDate] =
+    useState("");
+
   const dayNamesLong = [
     "Sunday",
     "Monday",
@@ -3328,6 +3529,130 @@ function AdminView({
     for (const assignment of choreAssignments) {
       await deleteDoc(doc(db, "assignments", assignment.id));
     }
+  };
+
+  const openEditChoreModal = (chore) => {
+    setEditingChore(chore);
+    setEditChoreName(chore.name);
+    setEditChoreMinutes(chore.minutes.toString());
+    // Default to today's date
+    const today = new Date().toISOString().split("T")[0];
+    setEditChoreEffectiveDate(today);
+  };
+
+  const closeEditChoreModal = () => {
+    setEditingChore(null);
+    setEditChoreName("");
+    setEditChoreMinutes("");
+    setEditChoreEffectiveDate("");
+  };
+
+  const saveEditChore = async () => {
+    if (!editingChore || !editChoreName.trim() || !editChoreMinutes) return;
+
+    const newMinutes = parseInt(editChoreMinutes);
+    if (Number.isNaN(newMinutes) || newMinutes <= 0) return;
+
+    // Validate effective date (cannot be in the future)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const effectiveDate = new Date(editChoreEffectiveDate + "T12:00:00");
+    if (effectiveDate > today) {
+      alert("Effective date cannot be in the future");
+      return;
+    }
+
+    const choreRef = doc(db, "chores", editingChore.id);
+    const currentChore = chores.find((c) => c.id === editingChore.id);
+    if (!currentChore) return;
+
+    // Prepare history entry with current values
+    const historyEntry = {
+      minutes: currentChore.minutes,
+      effectiveDate: currentChore.effectiveDate || editChoreEffectiveDate,
+    };
+
+    // If name changed, store old name in history
+    if (currentChore.name !== editChoreName.trim()) {
+      historyEntry.name = currentChore.name;
+    }
+
+    // Build update object
+    const updateData = {
+      name: editChoreName.trim(),
+      minutes: newMinutes,
+      effectiveDate: editChoreEffectiveDate,
+      lastChangedAt: new Date().toISOString(),
+    };
+
+    // Add to history array
+    const existingHistory = currentChore.history || [];
+    updateData.history = [...existingHistory, historyEntry];
+
+    await updateDoc(choreRef, updateData);
+    closeEditChoreModal();
+  };
+
+  const openEditAssignmentModal = (assignment) => {
+    setEditingAssignment(assignment);
+    setEditAssignmentFrequency(assignment.timesPerMonth.toString());
+    // Default to today's date
+    const today = new Date().toISOString().split("T")[0];
+    setEditAssignmentEffectiveDate(today);
+  };
+
+  const closeEditAssignmentModal = () => {
+    setEditingAssignment(null);
+    setEditAssignmentFrequency("");
+    setEditAssignmentEffectiveDate("");
+  };
+
+  const saveEditAssignment = async () => {
+    if (!editingAssignment || !editAssignmentFrequency) return;
+
+    const newFrequency = parseInt(editAssignmentFrequency);
+    if (Number.isNaN(newFrequency) || newFrequency <= 0) {
+      alert("Frequency must be greater than 0");
+      return;
+    }
+
+    // Validate effective date (cannot be in the future)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const effectiveDate = new Date(
+      editAssignmentEffectiveDate + "T12:00:00"
+    );
+    if (effectiveDate > today) {
+      alert("Effective date cannot be in the future");
+      return;
+    }
+
+    const assignmentRef = doc(db, "assignments", editingAssignment.id);
+    const currentAssignment = assignments.find(
+      (a) => a.id === editingAssignment.id
+    );
+    if (!currentAssignment) return;
+
+    // Prepare history entry with current values
+    const historyEntry = {
+      timesPerMonth: currentAssignment.timesPerMonth,
+      effectiveDate:
+        currentAssignment.effectiveDate || editAssignmentEffectiveDate,
+    };
+
+    // Build update object
+    const updateData = {
+      timesPerMonth: newFrequency,
+      effectiveDate: editAssignmentEffectiveDate,
+      lastChangedAt: new Date().toISOString(),
+    };
+
+    // Add to history array
+    const existingHistory = currentAssignment.history || [];
+    updateData.history = [...existingHistory, historyEntry];
+
+    await updateDoc(assignmentRef, updateData);
+    closeEditAssignmentModal();
   };
 
   const addAssignment = async () => {
@@ -3545,24 +3870,46 @@ function AdminView({
                       ({chore.minutes} min)
                     </span>
                   </div>
-                  <button
-                    onClick={() => deleteChore(chore.id)}
-                    className="p-2 text-stone-400 hover:text-red-500 transition-colors"
-                  >
-                    <svg
-                      className="w-5 h-5"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => openEditChoreModal(chore)}
+                      className="p-2 text-stone-400 hover:text-stone-600 transition-colors"
+                      title="Edit chore"
                     >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                      />
-                    </svg>
-                  </button>
+                      <svg
+                        className="w-5 h-5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                        />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => deleteChore(chore.id)}
+                      className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+                      title="Delete chore"
+                    >
+                      <svg
+                        className="w-5 h-5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               ))}
             {chores.length === 0 && (
@@ -3696,24 +4043,46 @@ function AdminView({
                         </span>
                       )}
                   </div>
-                  <button
-                    onClick={() => deleteAssignment(assignment.id)}
-                    className="p-2 text-stone-400 hover:text-red-500 transition-colors"
-                  >
-                    <svg
-                      className="w-5 h-5"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => openEditAssignmentModal(assignment)}
+                      className="p-2 text-stone-400 hover:text-stone-600 transition-colors"
+                      title="Edit assignment"
                     >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                      />
-                    </svg>
-                  </button>
+                      <svg
+                        className="w-5 h-5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                        />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => deleteAssignment(assignment.id)}
+                      className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+                      title="Delete assignment"
+                    >
+                      <svg
+                        className="w-5 h-5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               ))}
             {assignments.length === 0 && (
@@ -4019,6 +4388,160 @@ function AdminView({
                 No community chore types added yet.
               </p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Edit Chore Modal */}
+      {editingChore && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl card-shadow p-6 max-w-md w-full mx-4">
+            <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+              Edit Chore
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Chore Name
+                </label>
+                <input
+                  type="text"
+                  value={editChoreName}
+                  onChange={(e) => setEditChoreName(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+                  placeholder="Chore name..."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Minutes
+                </label>
+                <input
+                  type="number"
+                  value={editChoreMinutes}
+                  onChange={(e) => setEditChoreMinutes(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+                  placeholder="Minutes"
+                  min="1"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Effective Date
+                </label>
+                <p className="text-xs text-stone-500 mb-2">
+                  When did these values become effective? (Cannot be in the
+                  future)
+                </p>
+                <input
+                  type="date"
+                  value={editChoreEffectiveDate}
+                  onChange={(e) => setEditChoreEffectiveDate(e.target.value)}
+                  max={new Date().toISOString().split("T")[0]}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+                />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={closeEditChoreModal}
+                  className="flex-1 px-6 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium hover:bg-stone-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveEditChore}
+                  className="flex-1 px-6 py-3 rounded-xl btn-primary text-white font-medium"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Assignment Modal */}
+      {editingAssignment && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl card-shadow p-6 max-w-md w-full mx-4">
+            <h3 className="font-display text-xl font-semibold text-stone-800 mb-4">
+              Edit Assignment
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Person
+                </label>
+                <input
+                  type="text"
+                  value={
+                    people.find((p) => p.id === editingAssignment.personId)
+                      ?.name || ""
+                  }
+                  disabled
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-100 text-stone-600"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Chore
+                </label>
+                <input
+                  type="text"
+                  value={
+                    chores.find((c) => c.id === editingAssignment.choreId)
+                      ?.name || ""
+                  }
+                  disabled
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-100 text-stone-600"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Times Per Month
+                </label>
+                <input
+                  type="number"
+                  value={editAssignmentFrequency}
+                  onChange={(e) => setEditAssignmentFrequency(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+                  placeholder="Times/month"
+                  min="1"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Effective Date
+                </label>
+                <p className="text-xs text-stone-500 mb-2">
+                  When did this frequency become effective? (Cannot be in the
+                  future)
+                </p>
+                <input
+                  type="date"
+                  value={editAssignmentEffectiveDate}
+                  onChange={(e) =>
+                    setEditAssignmentEffectiveDate(e.target.value)
+                  }
+                  max={new Date().toISOString().split("T")[0]}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+                />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={closeEditAssignmentModal}
+                  className="flex-1 px-6 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium hover:bg-stone-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveEditAssignment}
+                  className="flex-1 px-6 py-3 rounded-xl btn-primary text-white font-medium"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

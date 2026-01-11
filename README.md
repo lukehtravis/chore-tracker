@@ -48,6 +48,8 @@ The application was built to fulfill the following requirements:
   - Provisional credits until debts are paid or expire
   - Automatic retroactive stats adjustment when debts expire
 - **Admin Panel**: Manage people, chores, and assignments
+  - **Chore Editing**: Edit chore names and minutes with effective dates, preserving historical accuracy
+  - **Assignment Editing**: Edit assignment frequencies with effective dates, preserving historical accuracy
   - **Fee Settings**: Configure reward thresholds, reward amounts, and penalty modifiers
   - **Community Chore Types**: Manage types/categories of community chores (e.g., "Yard Work", "Deep Clean")
   - **Community Credit Tiers**: Configure tiered credit system for community chores (fixed credits per minute range)
@@ -117,6 +119,14 @@ interface Chore {
   id: string;           // Unique identifier (generated)
   name: string;         // Name of the chore (e.g., "Dishes", "Vacuum")
   minutes: number;      // Time value in minutes for completing this chore
+  // Optional versioning fields (added for editing feature):
+  effectiveDate?: string;  // YYYY-MM-DD format, when current values became effective
+  history?: Array<{
+    minutes: number;
+    name?: string;  // Store old name if it changed
+    effectiveDate: string;  // YYYY-MM-DD, when this version was effective
+  }>;
+  lastChangedAt?: string;  // ISO timestamp of last edit
 }
 ```
 
@@ -124,7 +134,16 @@ interface Chore {
 
 - Create: Add new chore with name and minutes via Admin panel
 - Read: Real-time listener syncs all chores
+- Update: Edit chore name and/or minutes with an effective date (preserves history)
 - Delete: Removes chore and all related assignments (cascade delete)
+
+**Versioning Behavior:**
+
+- If `effectiveDate` is missing, assume values have been effective since the beginning
+- `history` array stores previous versions in chronological order (oldest first)
+- When editing, current values are pushed to `history`, then current values are updated
+- Historical calculations use values effective on the date being calculated
+- Backward compatible: Existing chores without versioning fields continue to work
 
 #### 3. `assignments` Collection
 
@@ -137,6 +156,13 @@ interface Assignment {
   choreId: string;               // Reference to chore.id
   timesPerMonth: number;         // How many times per month this person should do this chore
   dayOfWeek?: number | null;     // Optional: 0-6 (Sunday-Saturday) for day-specific chores
+  // Optional versioning fields (added for editing feature):
+  effectiveDate?: string;  // YYYY-MM-DD format, when current frequency became effective
+  history?: Array<{
+    timesPerMonth: number;
+    effectiveDate: string;  // YYYY-MM-DD, when this version was effective
+  }>;
+  lastChangedAt?: string;  // ISO timestamp of last edit
 }
 ```
 
@@ -151,7 +177,16 @@ interface Assignment {
 
 - Create/Update: Assign chore to person with frequency and optional day
 - Read: Real-time listener syncs all assignments
+- Update: Edit assignment frequency with an effective date (preserves history)
 - Delete: Remove specific assignment
+
+**Versioning Behavior:**
+
+- If `effectiveDate` is missing, assume frequency has been effective since the beginning
+- `history` array stores previous frequencies in chronological order
+- When editing, current frequency is pushed to `history`, then current frequency is updated
+- Historical calculations use frequencies effective on the date being calculated
+- Backward compatible: Existing assignments without versioning fields continue to work
 
 #### 4. `completions` Collection
 
@@ -370,16 +405,33 @@ Person (1) ──< (many) Completion (many) >── (1) CommunityChoreType (comm
 
 For a given person and time period:
 
+**Month-Specific Calculations:**
 ```typescript
 expectedMinutes = sum(
   for each assignment where personId === person.id:
-    chore.minutes * assignment.timesPerMonth * monthMultiplier
+    getChoreMinutesAtDate(chore, monthStartDate) * 
+    getAssignmentFrequencyAtDate(assignment, monthStartDate) * 1
 )
 ```
 
-Where `monthMultiplier` is:
-- `1` for a specific month filter
-- `getMonthsSinceStart()` for all-time calculations (number of months since first completion)
+**All-Time Calculations:**
+```typescript
+// For each month with completions:
+expectedMinutes = sum(
+  for each month in monthsWithCompletions:
+    for each assignment where personId === person.id:
+      getChoreMinutesAtDate(chore, monthStartDate) * 
+      getAssignmentFrequencyAtDate(assignment, monthStartDate) * 1
+)
+```
+
+**Historical Value Lookup:**
+- `getChoreMinutesAtDate(chore, date)`: Returns the chore minutes that were effective on a given date
+- `getAssignmentFrequencyAtDate(assignment, date)`: Returns the assignment frequency that was effective on a given date
+- These functions handle versioning by checking `effectiveDate` and `history` arrays
+- If no versioning exists, returns current values (backward compatible)
+
+**Key Principle:** Expected minutes use the values (chore minutes and assignment frequency) that were effective during the time period being calculated, ensuring historical accuracy.
 
 ### Completed Minutes Calculation
 
@@ -400,7 +452,19 @@ completedMinutes = sum(
 
 **Key Change:** Credits are assigned based on `forPersonId`, not `completedBy`. This means when Person A does a chore for Person B, Person B gets the credit toward their completion stats.
 
+**Important:** Completed minutes come from the `completion.minutes` field stored at the time of recording. These values are **immutable** and do not change when chores are edited. Only expected minutes calculations use historical values.
+
 Filtered by date range if calculating for a specific month.
+
+### Chore Name Display
+
+Chore names displayed in the UI use historical values when showing past completions:
+
+- **Calendar View**: Completion dots show the chore name that was effective when the completion was recorded (`getChoreNameAtDate(chore, completion.date)`)
+- **Analysis View**: Chore breakdowns group by the name that was effective at completion time
+- **Debts View**: Debts show the chore name that was effective when the debt was created
+
+This ensures that if a chore is renamed, historical completions still show the correct name from that time period.
 
 ### Percentage Calculation
 
@@ -648,6 +712,44 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
    - Optionally mark as "day-specific" and select a day of week
    - System prevents duplicate assignments
 
+### 1a. Editing Chores and Assignments (Admin View)
+
+**Editing a Chore:**
+1. Navigate to Admin panel → Chores tab
+2. Click the "Edit" button (pencil icon) next to the chore you want to edit
+3. Modal opens with:
+   - Current chore name (editable)
+   - Current minutes (editable)
+   - Effective date picker (defaults to today, cannot be in the future)
+4. Make your changes and select when they became effective
+5. Click "Save Changes"
+6. System automatically:
+   - Saves current values to history
+   - Updates current values
+   - Sets effective date
+   - Updates `lastChangedAt` timestamp
+
+**Editing an Assignment:**
+1. Navigate to Admin panel → Assignments tab
+2. Click the "Edit" button (pencil icon) next to the assignment you want to edit
+3. Modal opens with:
+   - Person and chore (read-only, shown for reference)
+   - Current frequency (editable)
+   - Effective date picker (defaults to today, cannot be in the future)
+4. Make your changes and select when they became effective
+5. Click "Save Changes"
+6. System automatically:
+   - Saves current frequency to history
+   - Updates current frequency
+   - Sets effective date
+   - Updates `lastChangedAt` timestamp
+
+**Important Notes:**
+- Effective dates cannot be in the future
+- Historical completions are **not** changed - they preserve the minutes that were actually completed
+- Expected minutes calculations will use the values effective during each time period
+- If you edit a chore from 5 to 10 minutes with effective date Jan 1st, a completion recorded on Jan 5th will still show 5 minutes (what was actually done), but expected minutes for January will use 10 minutes
+
 ### 2. Recording Completions (Calendar View)
 
 1. Navigate to Calendar view
@@ -826,7 +928,13 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
 - Tab navigation (People, Chores, Assignments, Fee Settings, Community Chores)
 - CRUD operations for people
 - CRUD operations for chores
+  - **Edit Chores**: Edit name and/or minutes with effective dates
+  - Edit modal validates effective date (cannot be in future)
+  - Automatically preserves history when editing
 - CRUD operations for assignments
+  - **Edit Assignments**: Edit frequency with effective dates
+  - Edit modal validates effective date (cannot be in future)
+  - Automatically preserves history when editing
 - Day-specific assignment option
 - Cascade delete (deleting person/chore also deletes assignments)
 - **Fee Settings**: Configure reward threshold, reward amount, penalty modifier, and community credit tiers
@@ -869,6 +977,38 @@ Returns the number of days in a given month (0-indexed).
 ### `getFirstDayOfMonth(year, month)`
 
 Returns the day of week (0-6, Sunday-Saturday) for the first day of a month.
+
+### Historical Value Helper Functions
+
+These functions are used to retrieve values that were effective on a specific date, supporting the chore and assignment editing feature:
+
+#### `getChoreMinutesAtDate(chore, date: string): number`
+
+Returns the chore minutes that were effective on a given date.
+
+**Logic:**
+- If no versioning exists (`effectiveDate` and `history` are missing), returns current `chore.minutes` (backward compatible)
+- Checks if current version was effective on the target date
+- If not, searches `history` array for the version that was active on that date
+- Returns the minutes from the appropriate version
+
+**Usage:** Used in all expected minutes calculations to ensure historical accuracy.
+
+#### `getChoreNameAtDate(chore, date: string): string`
+
+Returns the chore name that was effective on a given date.
+
+**Logic:** Similar to `getChoreMinutesAtDate`, but returns the name from the appropriate version.
+
+**Usage:** Used in calendar view tooltips, analysis view breakdowns, and debts view to show the correct historical name.
+
+#### `getAssignmentFrequencyAtDate(assignment, date: string): number`
+
+Returns the assignment frequency that was effective on a given date.
+
+**Logic:** Similar to `getChoreMinutesAtDate`, but searches `assignment.history` for `timesPerMonth`.
+
+**Usage:** Used in all expected minutes calculations to ensure historical accuracy.
 
 ## Setup
 
@@ -1028,7 +1168,7 @@ The history view automatically filters out months where no one has any completio
 
 ## Future Improvement Opportunities
 
-1. **Completion Editing/Deletion**: Add UI to edit or delete completion records
+1. **Completion Editing/Deletion**: Add UI to edit or delete completion records (note: chore/assignment editing is now implemented)
 2. **Bulk Operations**: Allow recording multiple completions at once
 3. **Chore Templates**: Pre-defined chore sets for common household types
 4. **Notifications**: Remind people of upcoming or overdue chores

@@ -796,6 +796,7 @@ function RecordChoreModal({
   const [selectedCommunityChoreType, setSelectedCommunityChoreType] =
     useState("");
   const [communityMinutes, setCommunityMinutes] = useState("");
+  const [communityDescription, setCommunityDescription] = useState("");
   const [saving, setSaving] = useState(false);
   const [isPartial, setIsPartial] = useState(false);
   const [partialMinutes, setPartialMinutes] = useState("");
@@ -924,9 +925,19 @@ function RecordChoreModal({
         minutes: minutesDone,
         createdAt: nowIso,
       };
+      
+      // Add description if provided
+      if (communityDescription.trim()) {
+        completionData.description = communityDescription.trim();
+      }
 
       await setDoc(doc(db, "completions", completionId), completionData);
       setSaving(false);
+      // Reset form
+      setCommunityDescription("");
+      setCommunityMinutes("");
+      setSelectedCommunityChoreType("");
+      setSelectedPerson("");
       onClose();
       return;
     }
@@ -1075,6 +1086,7 @@ function RecordChoreModal({
                 setSelectedChore("");
                 setSelectedCommunityChoreType("");
                 setCommunityMinutes("");
+                setCommunityDescription("");
                 setIsPartial(false);
                 setPartialMinutes("");
                 setForPersonId("");
@@ -1180,6 +1192,22 @@ function RecordChoreModal({
                   placeholder="Enter minutes (1-999)"
                   className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Description (optional)
+                </label>
+                <textarea
+                  value={communityDescription}
+                  onChange={(e) => setCommunityDescription(e.target.value)}
+                  placeholder="Brief description of what was done..."
+                  rows={3}
+                  maxLength={200}
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800 resize-none"
+                />
+                <p className="mt-1 text-xs text-stone-500">
+                  {communityDescription.length}/200 characters
+                </p>
               </div>
             </>
           )}
@@ -1375,6 +1403,20 @@ function AnalysisView({
       });
     }
     return months;
+  };
+
+  // Helper function to check if a person was added before/on a given month
+  const wasPersonAddedByMonth = (person, monthKey: string): boolean => {
+    // Backward compatibility: if no dateAdded, assume person was added at the beginning
+    if (!person.dateAdded) {
+      return true;
+    }
+    
+    // Extract month from dateAdded (format: YYYY-MM-DD or YYYY-MM)
+    const personMonthKey = person.dateAdded.substring(0, 7); // "YYYY-MM"
+    
+    // Person is included if their dateAdded month is <= the target month
+    return personMonthKey <= monthKey;
   };
 
   // Helper function to calculate stats without expired debt credits
@@ -1646,13 +1688,24 @@ function AnalysisView({
     // Per-person contributions
     const perPerson = {};
     communityCompletions.forEach((c) => {
-      perPerson[c.completedBy] = (perPerson[c.completedBy] || 0) + c.minutes;
+      if (!perPerson[c.completedBy]) {
+        perPerson[c.completedBy] = {
+          minutes: 0,
+          descriptions: [],
+        };
+      }
+      perPerson[c.completedBy].minutes += c.minutes;
+      // Collect descriptions (only if they exist and are not empty)
+      if (c.description && c.description.trim()) {
+        perPerson[c.completedBy].descriptions.push(c.description.trim());
+      }
     });
 
     const topContributors = Object.entries(perPerson)
-      .map(([personId, minutes]) => ({
+      .map(([personId, data]) => ({
         personId,
-        minutes,
+        minutes: data.minutes,
+        descriptions: data.descriptions,
         name: people.find((p) => p.id === personId)?.name || "Unknown",
       }))
       .sort((a, b) => b.minutes - a.minutes)
@@ -2455,19 +2508,28 @@ function AnalysisView({
                           (contributor, idx) => (
                             <div
                               key={contributor.personId}
-                              className="flex items-center justify-between p-3 bg-stone-50 rounded-xl"
+                              className="flex items-start justify-between p-3 bg-stone-50 rounded-xl gap-3"
                             >
-                              <div className="flex items-center gap-2">
-                                <span className="text-stone-500 font-medium">
+                              <div className="flex items-start gap-2 flex-1 min-w-0">
+                                <span className="text-stone-500 font-medium flex-shrink-0">
                                   {idx + 1}.
                                 </span>
-                                <span className="font-medium text-stone-800">
-                                  {contributor.name}
-                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-medium text-stone-800">
+                                      {contributor.name}
+                                    </span>
+                                    <span className="text-stone-700 font-medium flex-shrink-0">
+                                      {contributor.minutes} min
+                                    </span>
+                                  </div>
+                                  {contributor.descriptions.length > 0 && (
+                                    <p className="text-sm text-stone-600 mt-1">
+                                      {contributor.descriptions.join(" • ")}
+                                    </p>
+                                  )}
+                                </div>
                               </div>
-                              <span className="text-stone-700 font-medium">
-                                {contributor.minutes} min
-                              </span>
                             </div>
                           )
                         )}
@@ -2548,17 +2610,24 @@ function AnalysisView({
                       </thead>
                       <tbody>
                         {people.map((person) => {
-                          const monthData = historyMonthsToShow.map((m) =>
-                            calculatePersonStatsWithoutExpiredDebts(
+                          const monthData = historyMonthsToShow.map((m) => {
+                            const wasAdded = wasPersonAddedByMonth(person, m.key);
+                            if (!wasAdded) {
+                              return null; // Person wasn't added yet in this month
+                            }
+                            return calculatePersonStatsWithoutExpiredDebts(
                               person.id,
                               m.key
-                            )
-                          );
-                          const totalCompleted = monthData.reduce(
+                            );
+                          });
+                          
+                          // Calculate totals only for months where person was added
+                          const validMonthData = monthData.filter((m) => m !== null);
+                          const totalCompleted = validMonthData.reduce(
                             (sum, m) => sum + m.completedMinutes,
                             0
                           );
-                          const totalExpected = monthData.reduce(
+                          const totalExpected = validMonthData.reduce(
                             (sum, m) => sum + m.expectedMinutes,
                             0
                           );
@@ -2579,27 +2648,31 @@ function AnalysisView({
                               </td>
                               {monthData.map((stats, mIdx) => (
                                 <td key={mIdx} className="p-4 text-center">
-                                  <div className="flex flex-col items-center gap-1">
-                                    <span className="text-stone-800 font-medium">
-                                      {stats.completedMinutes}
-                                    </span>
-                                    <span className="text-xs text-stone-400">
-                                      / {stats.expectedMinutes}
-                                    </span>
-                                    <span
-                                      className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                                        stats.percentage >= 100
-                                          ? "bg-green-100 text-green-700"
-                                          : stats.percentage >= 75
-                                          ? "bg-amber-100 text-amber-700"
-                                          : stats.percentage >= 50
-                                          ? "bg-orange-100 text-orange-700"
-                                          : "bg-red-100 text-red-700"
-                                      }`}
-                                    >
-                                      {stats.percentage}%
-                                    </span>
-                                  </div>
+                                  {stats === null ? (
+                                    <span className="text-stone-300">—</span>
+                                  ) : (
+                                    <div className="flex flex-col items-center gap-1">
+                                      <span className="text-stone-800 font-medium">
+                                        {stats.completedMinutes}
+                                      </span>
+                                      <span className="text-xs text-stone-400">
+                                        / {stats.expectedMinutes}
+                                      </span>
+                                      <span
+                                        className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                                          stats.percentage >= 100
+                                            ? "bg-green-100 text-green-700"
+                                            : stats.percentage >= 75
+                                            ? "bg-amber-100 text-amber-700"
+                                            : stats.percentage >= 50
+                                            ? "bg-orange-100 text-orange-700"
+                                            : "bg-red-100 text-red-700"
+                                        }`}
+                                      >
+                                        {stats.percentage}%
+                                      </span>
+                                    </div>
+                                  )}
                                 </td>
                               ))}
                               <td className="p-4 text-center bg-amber-50/50">
@@ -2664,10 +2737,17 @@ function AnalysisView({
                       </thead>
                       <tbody>
                         {people.map((person) => {
-                          const monthData = historyMonthsToShow.map((m) =>
-                            calculatePersonCommunityStats(person.id, m.key)
-                          );
-                          const totalMinutes = monthData.reduce(
+                          const monthData = historyMonthsToShow.map((m) => {
+                            const wasAdded = wasPersonAddedByMonth(person, m.key);
+                            if (!wasAdded) {
+                              return null; // Person wasn't added yet in this month
+                            }
+                            return calculatePersonCommunityStats(person.id, m.key);
+                          });
+                          
+                          // Calculate totals only for months where person was added
+                          const validMonthData = monthData.filter((m) => m !== null);
+                          const totalMinutes = validMonthData.reduce(
                             (sum, m) => sum + m.totalMinutes,
                             0
                           );
@@ -2682,9 +2762,13 @@ function AnalysisView({
                               </td>
                               {monthData.map((stats, mIdx) => (
                                 <td key={mIdx} className="p-4 text-center">
-                                  <span className="text-stone-800 font-medium">
-                                    {stats.totalMinutes} min
-                                  </span>
+                                  {stats === null ? (
+                                    <span className="text-stone-300">—</span>
+                                  ) : (
+                                    <span className="text-stone-800 font-medium">
+                                      {stats.totalMinutes} min
+                                    </span>
+                                  )}
                                 </td>
                               ))}
                               <td className="p-4 text-center bg-cyan-50/50">
@@ -3497,7 +3581,13 @@ function AdminView({
   const addPerson = async () => {
     if (!newPersonName.trim()) return;
     const id = generateId();
-    await setDoc(doc(db, "people", id), { id, name: newPersonName.trim() });
+    const today = new Date();
+    const dateAdded = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    await setDoc(doc(db, "people", id), { 
+      id, 
+      name: newPersonName.trim(),
+      dateAdded 
+    });
     setNewPersonName("");
   };
 

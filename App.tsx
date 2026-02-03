@@ -9,6 +9,11 @@ import {
   deleteDoc,
   updateDoc,
 } from "firebase/firestore";
+import {
+  getChoreMinutesAtDate,
+  getChoreNameAtDate,
+  getAssignmentFrequencyAtDate,
+} from "./utils/historical";
 
 // Firebase config - loaded from environment variables
 const firebaseConfig = {
@@ -62,126 +67,7 @@ const checkAndMarkExpiredDebts = async (debts, completions, db) => {
 };
 
 // Helper functions for chore and assignment versioning
-// Get the chore minutes that were effective on a given date
-const getChoreMinutesAtDate = (chore, date: string): number => {
-  // If no versioning, return current minutes (backward compatible)
-  if (!chore.effectiveDate && !chore.history) {
-    return chore.minutes;
-  }
-
-  // Parse target date
-  const targetDate = new Date(date + "T12:00:00");
-
-  // Check if current version was effective on this date
-  if (chore.effectiveDate) {
-    const effectiveDate = new Date(chore.effectiveDate + "T12:00:00");
-    if (targetDate >= effectiveDate) {
-      return chore.minutes; // Current version applies
-    }
-  }
-
-  // Search history for the version that was active on this date
-  if (chore.history && chore.history.length > 0) {
-    // Sort history by effectiveDate descending (newest first)
-    const sortedHistory = [...chore.history].sort(
-      (a, b) =>
-        new Date(b.effectiveDate + "T12:00:00").getTime() -
-        new Date(a.effectiveDate + "T12:00:00").getTime()
-    );
-
-    // Find the most recent version that was effective before or on target date
-    for (const version of sortedHistory) {
-      const versionDate = new Date(version.effectiveDate + "T12:00:00");
-      if (targetDate >= versionDate) {
-        return version.minutes;
-      }
-    }
-  }
-
-  // Fallback: if no version found, use current minutes
-  return chore.minutes;
-};
-
-// Get the chore name that was effective on a given date
-const getChoreNameAtDate = (chore, date: string): string => {
-  // If no versioning, return current name (backward compatible)
-  if (!chore.effectiveDate && !chore.history) {
-    return chore.name;
-  }
-
-  // Parse target date
-  const targetDate = new Date(date + "T12:00:00");
-
-  // Check if current version was effective on this date
-  if (chore.effectiveDate) {
-    const effectiveDate = new Date(chore.effectiveDate + "T12:00:00");
-    if (targetDate >= effectiveDate) {
-      return chore.name; // Current version applies
-    }
-  }
-
-  // Search history for the version that was active on this date
-  if (chore.history && chore.history.length > 0) {
-    // Sort history by effectiveDate descending (newest first)
-    const sortedHistory = [...chore.history].sort(
-      (a, b) =>
-        new Date(b.effectiveDate + "T12:00:00").getTime() -
-        new Date(a.effectiveDate + "T12:00:00").getTime()
-    );
-
-    // Find the most recent version that was effective before or on target date
-    for (const version of sortedHistory) {
-      const versionDate = new Date(version.effectiveDate + "T12:00:00");
-      if (targetDate >= versionDate) {
-        // Return the name from history if stored, otherwise use current name
-        return version.name !== undefined ? version.name : chore.name;
-      }
-    }
-  }
-
-  // Fallback: if no version found, use current name
-  return chore.name;
-};
-
-// Get the assignment frequency that was effective on a given date
-const getAssignmentFrequencyAtDate = (assignment, date: string): number => {
-  // If no versioning, return current frequency (backward compatible)
-  if (!assignment.effectiveDate && !assignment.history) {
-    return assignment.timesPerMonth;
-  }
-
-  // Parse target date
-  const targetDate = new Date(date + "T12:00:00");
-
-  // Check if current version was effective on this date
-  if (assignment.effectiveDate) {
-    const effectiveDate = new Date(assignment.effectiveDate + "T12:00:00");
-    if (targetDate >= effectiveDate) {
-      return assignment.timesPerMonth; // Current version applies
-    }
-  }
-
-  // Search history for the version that was active on this date
-  if (assignment.history && assignment.history.length > 0) {
-    // Sort history by effectiveDate descending (newest first)
-    const sortedHistory = [...assignment.history].sort(
-      (a, b) =>
-        new Date(b.effectiveDate + "T12:00:00").getTime() -
-        new Date(a.effectiveDate + "T12:00:00").getTime()
-    );
-
-    // Find the most recent version that was effective before or on target date
-    for (const version of sortedHistory) {
-      const versionDate = new Date(version.effectiveDate + "T12:00:00");
-      if (targetDate >= versionDate) {
-        return version.timesPerMonth;
-      }
-    }
-  }
-
-  // Fallback: if no version found, use current frequency
-  return assignment.timesPerMonth;
-};
+// Historical calculation functions are now imported from utils/historical.ts
 
 // Main App Component
 export default function App() {
@@ -946,7 +832,7 @@ function RecordChoreModal({
     const chore = chores.find((c) => c.id === selectedChore);
     const minutesDone = isPartial
       ? parseInt(partialMinutes, 10)
-      : chore?.minutes ?? 0;
+      : chore ? getChoreMinutesAtDate(chore, date) : 0;
 
     // Determine if this will create a new debt (needed for isProvisional)
     let debtIdForCompletion = undefined;
@@ -1489,7 +1375,9 @@ function AnalysisView({
         personAssignments.forEach((assignment) => {
           const chore = chores.find((c) => c.id === assignment.choreId);
           if (chore) {
-            expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+            const choreMinutes = getChoreMinutesAtDate(chore, monthFilter ? monthFilter + "-01" : new Date().toISOString().substring(0, 8) + "01");
+            const assignmentFreq = getAssignmentFrequencyAtDate(assignment, monthFilter ? monthFilter + "-01" : new Date().toISOString().substring(0, 8) + "01");
+            expectedMinutes += choreMinutes * assignmentFreq * 1;
           }
         });
       } else {
@@ -1589,7 +1477,9 @@ function AnalysisView({
         personAssignments.forEach((assignment) => {
           const chore = chores.find((c) => c.id === assignment.choreId);
           if (chore) {
-            expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+            const choreMinutes = getChoreMinutesAtDate(chore, monthFilter ? monthFilter + "-01" : new Date().toISOString().substring(0, 8) + "01");
+            const assignmentFreq = getAssignmentFrequencyAtDate(assignment, monthFilter ? monthFilter + "-01" : new Date().toISOString().substring(0, 8) + "01");
+            expectedMinutes += choreMinutes * assignmentFreq * 1;
           }
         });
       } else {
@@ -1848,7 +1738,9 @@ function AnalysisView({
         personAssignments.forEach((assignment) => {
           const chore = chores.find((c) => c.id === assignment.choreId);
           if (chore) {
-            expectedMinutes += chore.minutes * assignment.timesPerMonth * 1;
+            const choreMinutes = getChoreMinutesAtDate(chore, monthFilter ? monthFilter + "-01" : new Date().toISOString().substring(0, 8) + "01");
+            const assignmentFreq = getAssignmentFrequencyAtDate(assignment, monthFilter ? monthFilter + "-01" : new Date().toISOString().substring(0, 8) + "01");
+            expectedMinutes += choreMinutes * assignmentFreq * 1;
           }
         });
       } else {
@@ -3659,7 +3551,7 @@ function AdminView({
     // Prepare history entry with current values
     const historyEntry = {
       minutes: currentChore.minutes,
-      effectiveDate: currentChore.effectiveDate || editChoreEffectiveDate,
+      effectiveDate: currentChore.effectiveDate ?? null,
     };
 
     // If name changed, store old name in history
@@ -3726,8 +3618,7 @@ function AdminView({
     // Prepare history entry with current values
     const historyEntry = {
       timesPerMonth: currentAssignment.timesPerMonth,
-      effectiveDate:
-        currentAssignment.effectiveDate || editAssignmentEffectiveDate,
+      effectiveDate: currentAssignment.effectiveDate ?? null,
     };
 
     // Build update object

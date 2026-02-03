@@ -39,43 +39,36 @@ export const getChoreMinutesAtDate = (chore: Chore, date: string): number => {
   // Parse target date
   const targetDate = new Date(date + "T12:00:00");
 
-  // Check if current version was effective on this date
-  // Handle null effectiveDate (meaning "since the beginning of time")
-  if (chore.effectiveDate === null || chore.effectiveDate === undefined) {
-    return chore.minutes; // Current version has always been effective
-  }
-  if (chore.effectiveDate) {
-    const effectiveDate = new Date(chore.effectiveDate + "T12:00:00");
-    if (targetDate >= effectiveDate) {
-      return chore.minutes; // Current version applies
+  // Build complete version list (current + history)
+  const allVersions = [
+    { minutes: chore.minutes, effectiveDate: chore.effectiveDate },
+    ...(chore.history || [])
+  ];
+
+  // Sort by effectiveDate descending (newest first), nulls last (oldest)
+  const sorted = allVersions.sort((a, b) => {
+    if (!a.effectiveDate) return 1;
+    if (!b.effectiveDate) return -1;
+    return new Date(b.effectiveDate + "T12:00:00").getTime() -
+           new Date(a.effectiveDate + "T12:00:00").getTime();
+  });
+
+  // Find first version where target >= effectiveDate
+  for (const version of sorted) {
+    if (!version.effectiveDate) {
+      // No effectiveDate means "since beginning of time"
+      return version.minutes;
+    }
+    const versionDate = new Date(version.effectiveDate + "T12:00:00");
+    if (targetDate >= versionDate) {
+      return version.minutes;
     }
   }
 
-  // Search history for the version that was active on this date
-  if (chore.history && chore.history.length > 0) {
-    // Sort history by effectiveDate descending (newest first)
-    // Null/undefined dates go to the end (oldest)
-    const sortedHistory = [...chore.history].sort((a, b) => {
-      if (a.effectiveDate === null || a.effectiveDate === undefined) return 1;
-      if (b.effectiveDate === null || b.effectiveDate === undefined) return -1;
-      return new Date(b.effectiveDate + "T12:00:00").getTime() -
-             new Date(a.effectiveDate + "T12:00:00").getTime();
-    });
-
-    // Find the most recent version that was effective before or on target date
-    for (const version of sortedHistory) {
-      if (version.effectiveDate === null || version.effectiveDate === undefined) {
-        return version.minutes; // This version has always been effective
-      }
-      const versionDate = new Date(version.effectiveDate + "T12:00:00");
-      if (targetDate >= versionDate) {
-        return version.minutes;
-      }
-    }
-  }
-
-  // Fallback: if no version found, use current minutes
-  return chore.minutes;
+  // Target date is before ALL versions → use oldest value
+  // This handles the case where target date is earlier than earliest effectiveDate
+  const oldest = sorted[sorted.length - 1];
+  return oldest.minutes;
 };
 
 // Get the chore name that was effective on a given date
@@ -88,45 +81,35 @@ export const getChoreNameAtDate = (chore: Chore, date: string): string => {
   // Parse target date
   const targetDate = new Date(date + "T12:00:00");
 
-  // Check if current version was effective on this date
-  // Handle null effectiveDate (meaning "since the beginning of time")
-  if (chore.effectiveDate === null || chore.effectiveDate === undefined) {
-    return chore.name; // Current version has always been effective
-  }
-  if (chore.effectiveDate) {
-    const effectiveDate = new Date(chore.effectiveDate + "T12:00:00");
-    if (targetDate >= effectiveDate) {
-      return chore.name; // Current version applies
+  // Build complete version list (current + history with names)
+  const allVersions = [
+    { name: chore.name, effectiveDate: chore.effectiveDate },
+    ...(chore.history || []).filter(h => h.name) // Only include history entries that changed the name
+  ];
+
+  // Sort by effectiveDate descending (newest first), nulls last (oldest)
+  const sorted = allVersions.sort((a, b) => {
+    if (!a.effectiveDate) return 1;
+    if (!b.effectiveDate) return -1;
+    return new Date(b.effectiveDate + "T12:00:00").getTime() -
+           new Date(a.effectiveDate + "T12:00:00").getTime();
+  });
+
+  // Find first version where target >= effectiveDate
+  for (const version of sorted) {
+    if (!version.effectiveDate) {
+      // No effectiveDate means "since beginning of time"
+      return version.name;
+    }
+    const versionDate = new Date(version.effectiveDate + "T12:00:00");
+    if (targetDate >= versionDate) {
+      return version.name;
     }
   }
 
-  // Search history for the version that was active on this date
-  if (chore.history && chore.history.length > 0) {
-    // Sort history by effectiveDate descending (newest first)
-    // Null/undefined dates go to the end (oldest)
-    const sortedHistory = [...chore.history].sort((a, b) => {
-      if (a.effectiveDate === null || a.effectiveDate === undefined) return 1;
-      if (b.effectiveDate === null || b.effectiveDate === undefined) return -1;
-      return new Date(b.effectiveDate + "T12:00:00").getTime() -
-             new Date(a.effectiveDate + "T12:00:00").getTime();
-    });
-
-    // Find the most recent version that was effective before or on target date
-    for (const version of sortedHistory) {
-      if (version.effectiveDate === null || version.effectiveDate === undefined) {
-        // This version has always been effective
-        return version.name !== undefined ? version.name : chore.name;
-      }
-      const versionDate = new Date(version.effectiveDate + "T12:00:00");
-      if (targetDate >= versionDate) {
-        // Return the name from history if stored, otherwise use current name
-        return version.name !== undefined ? version.name : chore.name;
-      }
-    }
-  }
-
-  // Fallback: if no version found, use current name
-  return chore.name;
+  // Target date is before ALL versions → use oldest value
+  const oldest = sorted[sorted.length - 1];
+  return oldest.name;
 };
 
 // Get the assignment frequency that was effective on a given date
@@ -139,41 +122,33 @@ export const getAssignmentFrequencyAtDate = (assignment: Assignment, date: strin
   // Parse target date
   const targetDate = new Date(date + "T12:00:00");
 
-  // Check if current version was effective on this date
-  // Handle null effectiveDate (meaning "since the beginning of time")
-  if (assignment.effectiveDate === null || assignment.effectiveDate === undefined) {
-    return assignment.timesPerMonth; // Current version has always been effective
-  }
-  if (assignment.effectiveDate) {
-    const effectiveDate = new Date(assignment.effectiveDate + "T12:00:00");
-    if (targetDate >= effectiveDate) {
-      return assignment.timesPerMonth; // Current version applies
+  // Build complete version list (current + history)
+  const allVersions = [
+    { timesPerMonth: assignment.timesPerMonth, effectiveDate: assignment.effectiveDate },
+    ...(assignment.history || [])
+  ];
+
+  // Sort by effectiveDate descending (newest first), nulls last (oldest)
+  const sorted = allVersions.sort((a, b) => {
+    if (!a.effectiveDate) return 1;
+    if (!b.effectiveDate) return -1;
+    return new Date(b.effectiveDate + "T12:00:00").getTime() -
+           new Date(a.effectiveDate + "T12:00:00").getTime();
+  });
+
+  // Find first version where target >= effectiveDate
+  for (const version of sorted) {
+    if (!version.effectiveDate) {
+      // No effectiveDate means "since beginning of time"
+      return version.timesPerMonth;
+    }
+    const versionDate = new Date(version.effectiveDate + "T12:00:00");
+    if (targetDate >= versionDate) {
+      return version.timesPerMonth;
     }
   }
 
-  // Search history for the version that was active on this date
-  if (assignment.history && assignment.history.length > 0) {
-    // Sort history by effectiveDate descending (newest first)
-    // Null/undefined dates go to the end (oldest)
-    const sortedHistory = [...assignment.history].sort((a, b) => {
-      if (a.effectiveDate === null || a.effectiveDate === undefined) return 1;
-      if (b.effectiveDate === null || b.effectiveDate === undefined) return -1;
-      return new Date(b.effectiveDate + "T12:00:00").getTime() -
-             new Date(a.effectiveDate + "T12:00:00").getTime();
-    });
-
-    // Find the most recent version that was effective before or on target date
-    for (const version of sortedHistory) {
-      if (version.effectiveDate === null || version.effectiveDate === undefined) {
-        return version.timesPerMonth; // This version has always been effective
-      }
-      const versionDate = new Date(version.effectiveDate + "T12:00:00");
-      if (targetDate >= versionDate) {
-        return version.timesPerMonth;
-      }
-    }
-  }
-
-  // Fallback: if no version found, use current frequency
-  return assignment.timesPerMonth;
+  // Target date is before ALL versions → use oldest value
+  const oldest = sorted[sorted.length - 1];
+  return oldest.timesPerMonth;
 };

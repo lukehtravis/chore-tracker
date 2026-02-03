@@ -980,25 +980,28 @@ Returns the day of week (0-6, Sunday-Saturday) for the first day of a month.
 
 ### Historical Value Helper Functions
 
-These functions are used to retrieve values that were effective on a specific date, supporting the chore and assignment editing feature:
+These functions are used to retrieve values that were effective on a specific date, supporting the chore and assignment editing feature. All functions are located in `utils/historical.ts`.
 
 #### `getChoreMinutesAtDate(chore, date: string): number`
 
 Returns the chore minutes that were effective on a given date.
 
 **Logic:**
-- If no versioning exists (`effectiveDate` and `history` are missing), returns current `chore.minutes` (backward compatible)
-- Checks if current version was effective on the target date
-- If not, searches `history` array for the version that was active on that date
-- Returns the minutes from the appropriate version
+1. If no versioning exists (`effectiveDate` and `history` are missing), returns current `chore.minutes` (backward compatible)
+2. Combines current values and history into a single sorted list (newest to oldest)
+3. Searches for the first version where target date >= effectiveDate
+4. If no match found (target date is before all effectiveDates), returns the **oldest** value
+5. Null effectiveDate means "since beginning of time" and always matches
 
 **Usage:** Used in all expected minutes calculations to ensure historical accuracy.
+
+**Important:** When editing chores, set effectiveDate to the 1st of the month (e.g., "2026-01-01") to avoid gaps. Setting it to mid-month (e.g., "2026-01-15") means dates 1-14 will fall back to the oldest historical value, which may not be what you intend.
 
 #### `getChoreNameAtDate(chore, date: string): string`
 
 Returns the chore name that was effective on a given date.
 
-**Logic:** Similar to `getChoreMinutesAtDate`, but returns the name from the appropriate version.
+**Logic:** Similar to `getChoreMinutesAtDate`, but returns the name from the appropriate version. Only history entries that changed the name are included in the search.
 
 **Usage:** Used in calendar view tooltips, analysis view breakdowns, and debts view to show the correct historical name.
 
@@ -1006,9 +1009,18 @@ Returns the chore name that was effective on a given date.
 
 Returns the assignment frequency that was effective on a given date.
 
-**Logic:** Similar to `getChoreMinutesAtDate`, but searches `assignment.history` for `timesPerMonth`.
+**Logic:** Similar to `getChoreMinutesAtDate`, but searches for `timesPerMonth` values. Uses the same fallback logic - if target date is before all effectiveDates, returns the oldest frequency.
 
 **Usage:** Used in all expected minutes calculations to ensure historical accuracy.
+
+#### Testing
+
+The historical versioning system includes comprehensive test coverage:
+- **Unit tests** (`utils/historical.test.ts`): Test individual lookup functions with various date scenarios
+- **Integration tests** (`integration.test.ts`): Test end-to-end scenarios with multiple edits across months
+- Run tests with: `npm test`
+
+All tests use Jest and are configured to run with ts-jest for TypeScript support.
 
 ## Setup
 

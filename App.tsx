@@ -31,6 +31,12 @@ const db = getFirestore(app);
 // Utility functions
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
+// A person is "active" (can be assigned new work / shows in selectors)
+// when they have not been archived. Archived people are preserved for
+// historical reporting but should not appear in record/assign dropdowns.
+const isActivePerson = (person) => !person?.archivedAt;
+const isArchivedPerson = (person) => !!person?.archivedAt;
+
 const getMonthKey = (date) => {
   const d = new Date(date);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -1011,6 +1017,7 @@ function RecordChoreModal({
             >
               <option value="">Select person...</option>
               {[...people]
+                .filter(isActivePerson)
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((person) => (
                   <option key={person.id} value={person.id}>
@@ -3492,6 +3499,51 @@ function AdminView({
     }
   };
 
+  // Archive a person: preserve their historical record (completions, debts,
+  // fees stay intact) but free up their chore assignments so the chores can
+  // be reassigned. The person is hidden from selectors used to create new
+  // records but still shown in analysis views.
+  const archivePerson = async (id) => {
+    const person = people.find((p) => p.id === id);
+    if (!person) return;
+    const personAssignments = assignments.filter((a) => a.personId === id);
+    const confirmMsg =
+      `Archive ${person.name}?\n\n` +
+      `• Their history, completions, debts, and fees will be preserved.\n` +
+      `• Their ${personAssignments.length} chore assignment${
+        personAssignments.length === 1 ? "" : "s"
+      } will be deleted so the chores can be reassigned.\n` +
+      `• They will no longer appear in record-chore or assignment dropdowns.\n\n` +
+      `You can unarchive them later.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    await updateDoc(doc(db, "people", id), {
+      archivedAt: new Date().toISOString(),
+    });
+    for (const assignment of personAssignments) {
+      await deleteDoc(doc(db, "assignments", assignment.id));
+    }
+  };
+
+  const unarchivePerson = async (id) => {
+    await updateDoc(doc(db, "people", id), {
+      archivedAt: null,
+    });
+  };
+
+  const permanentlyDeletePerson = async (id) => {
+    const person = people.find((p) => p.id === id);
+    if (!person) return;
+    const ok = window.confirm(
+      `Permanently delete ${person.name}?\n\n` +
+        `This removes the person record itself. Past completions, debts, and ` +
+        `fees stay in the database but will show as "Unknown" in reports.\n\n` +
+        `This cannot be undone.`
+    );
+    if (!ok) return;
+    await deletePerson(id);
+  };
+
   const addChore = async () => {
     if (!newChoreName.trim() || !newChoreMinutes) return;
     const id = generateId();
@@ -3762,44 +3814,140 @@ function AdminView({
             </button>
           </div>
 
-          {/* People List */}
+          {/* Active People List */}
           <div className="space-y-2">
             {[...people]
+              .filter(isActivePerson)
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map((person) => (
-                <div
-                  key={person.id}
-                  className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
-                >
-                  <span className="font-medium text-stone-800">
-                    {person.name}
-                  </span>
-                  <button
-                    onClick={() => deletePerson(person.id)}
-                    className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+              .map((person) => {
+                const personAssignmentCount = assignments.filter(
+                  (a) => a.personId === person.id
+                ).length;
+                return (
+                  <div
+                    key={person.id}
+                    className="flex items-center justify-between p-4 bg-stone-50 rounded-xl"
                   >
-                    <svg
-                      className="w-5 h-5"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
+                    <div>
+                      <span className="font-medium text-stone-800">
+                        {person.name}
+                      </span>
+                      {personAssignmentCount > 0 && (
+                        <span className="ml-2 text-xs text-stone-500">
+                          {personAssignmentCount} assignment
+                          {personAssignmentCount === 1 ? "" : "s"}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => archivePerson(person.id)}
+                      className="px-3 py-1.5 text-sm text-stone-600 hover:text-stone-900 hover:bg-stone-200 rounded-lg transition-colors flex items-center gap-1.5"
+                      title="Archive (preserves history, frees up assignments)"
                     >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              ))}
-            {people.length === 0 && (
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
+                        />
+                      </svg>
+                      Archive
+                    </button>
+                  </div>
+                );
+              })}
+            {people.filter(isActivePerson).length === 0 && (
               <p className="text-center py-8 text-stone-500">
-                No people added yet.
+                No active people. Add a household member above.
               </p>
             )}
           </div>
+
+          {/* Archived People List */}
+          {people.some(isArchivedPerson) && (
+            <div className="mt-8 pt-6 border-t border-stone-200">
+              <h4 className="text-sm font-semibold text-stone-500 uppercase tracking-wide mb-3">
+                Archived ({people.filter(isArchivedPerson).length})
+              </h4>
+              <p className="text-xs text-stone-500 mb-4">
+                Archived members are hidden from new-record dropdowns but still
+                appear in historical reports and the calendar.
+              </p>
+              <div className="space-y-2">
+                {[...people]
+                  .filter(isArchivedPerson)
+                  .sort((a, b) => {
+                    // Most recently archived first
+                    const aTime = a.archivedAt
+                      ? new Date(a.archivedAt).getTime()
+                      : 0;
+                    const bTime = b.archivedAt
+                      ? new Date(b.archivedAt).getTime()
+                      : 0;
+                    return bTime - aTime;
+                  })
+                  .map((person) => {
+                    const archivedDate = person.archivedAt
+                      ? new Date(person.archivedAt).toLocaleDateString(
+                          "en-US",
+                          { month: "short", day: "numeric", year: "numeric" }
+                        )
+                      : null;
+                    return (
+                      <div
+                        key={person.id}
+                        className="flex items-center justify-between p-4 bg-stone-50/60 rounded-xl border border-stone-100"
+                      >
+                        <div>
+                          <span className="font-medium text-stone-600">
+                            {person.name}
+                          </span>
+                          {archivedDate && (
+                            <span className="ml-2 text-xs text-stone-400">
+                              archived {archivedDate}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => unarchivePerson(person.id)}
+                            className="px-3 py-1.5 text-sm text-stone-700 bg-white border border-stone-200 hover:bg-stone-100 rounded-lg transition-colors"
+                            title="Restore as an active member"
+                          >
+                            Unarchive
+                          </button>
+                          <button
+                            onClick={() => permanentlyDeletePerson(person.id)}
+                            className="p-2 text-stone-400 hover:text-red-500 transition-colors"
+                            title="Permanently delete"
+                          >
+                            <svg
+                              className="w-5 h-5"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3918,6 +4066,7 @@ function AdminView({
             >
               <option value="">Select person...</option>
               {[...people]
+                .filter(isActivePerson)
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((person) => (
                   <option key={person.id} value={person.id}>

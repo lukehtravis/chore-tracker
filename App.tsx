@@ -3499,30 +3499,25 @@ function AdminView({
     }
   };
 
-  // Archive a person: preserve their historical record (completions, debts,
-  // fees stay intact) but free up their chore assignments so the chores can
-  // be reassigned. The person is hidden from selectors used to create new
-  // records but still shown in analysis views.
+  // Archive a person: hide them from selectors that create new records, but
+  // leave everything else (completions, assignments, debts, fees) intact so
+  // historical reporting stays accurate. To "transition" responsibilities,
+  // just add the new person and assign them to the relevant chores — two
+  // people can share an assignment without conflict.
   const archivePerson = async (id) => {
     const person = people.find((p) => p.id === id);
     if (!person) return;
-    const personAssignments = assignments.filter((a) => a.personId === id);
     const confirmMsg =
       `Archive ${person.name}?\n\n` +
-      `• Their history, completions, debts, and fees will be preserved.\n` +
-      `• Their ${personAssignments.length} chore assignment${
-        personAssignments.length === 1 ? "" : "s"
-      } will be deleted so the chores can be reassigned.\n` +
-      `• They will no longer appear in record-chore or assignment dropdowns.\n\n` +
+      `Their full history is preserved — past completions, assignments, ` +
+      `debts, and fees stay exactly as they are. They will simply be hidden ` +
+      `from the "Who did the chore?" and assignment-creation dropdowns.\n\n` +
       `You can unarchive them later.`;
     if (!window.confirm(confirmMsg)) return;
 
     await updateDoc(doc(db, "people", id), {
       archivedAt: new Date().toISOString(),
     });
-    for (const assignment of personAssignments) {
-      await deleteDoc(doc(db, "assignments", assignment.id));
-    }
   };
 
   const unarchivePerson = async (id) => {
@@ -4149,7 +4144,10 @@ function AdminView({
                 const chore = chores.find((c) => c.id === assignment.choreId);
                 return { assignment, person, chore };
               })
-              .filter((item) => item.person && item.chore)
+              .filter(
+                (item) =>
+                  item.person && item.chore && isActivePerson(item.person)
+              )
               .sort((a, b) => a.person.name.localeCompare(b.person.name))
               .map(({ assignment, person, chore }) => (
                 <div

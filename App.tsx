@@ -37,6 +37,25 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 const isActivePerson = (person) => !person?.archivedAt;
 const isArchivedPerson = (person) => !!person?.archivedAt;
 
+// Whether a person was a household member during a given month (YYYY-MM).
+// True if their dateAdded month is <= monthKey AND (if archived) their
+// archivedAt month is >= monthKey. Missing bounds are treated as open
+// (back-compat: a person without dateAdded is assumed always-active).
+// Use this to gate month-scoped views (calendar legend, monthly stats,
+// fees table) so a new member doesn't appear in months before they joined
+// and an archived member doesn't appear after they left.
+const wasPersonActiveInMonth = (person, monthKey: string): boolean => {
+  if (person?.dateAdded) {
+    const addedMonth = person.dateAdded.substring(0, 7); // "YYYY-MM"
+    if (addedMonth > monthKey) return false;
+  }
+  if (person?.archivedAt) {
+    const archivedMonth = person.archivedAt.substring(0, 7); // "YYYY-MM"
+    if (archivedMonth < monthKey) return false;
+  }
+  return true;
+};
+
 const getMonthKey = (date) => {
   const d = new Date(date);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -516,21 +535,23 @@ function CalendarView({
         </button>
       </div>
 
-      {/* Legend */}
+      {/* Legend — only people who were household members during this month */}
       {people.length > 0 && (
         <div className="flex flex-wrap gap-3 mb-6">
-          {people.map((person) => (
-            <div
-              key={person.id}
-              className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-full card-shadow"
-            >
+          {people
+            .filter((person) => wasPersonActiveInMonth(person, monthKey))
+            .map((person) => (
               <div
-                className="w-3 h-3 rounded-full"
-                style={{ backgroundColor: personColors[person.id] }}
-              />
-              <span className="text-sm text-stone-600">{person.name}</span>
-            </div>
-          ))}
+                key={person.id}
+                className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-full card-shadow"
+              >
+                <div
+                  className="w-3 h-3 rounded-full"
+                  style={{ backgroundColor: personColors[person.id] }}
+                />
+                <span className="text-sm text-stone-600">{person.name}</span>
+              </div>
+            ))}
         </div>
       )}
 
@@ -1298,20 +1319,6 @@ function AnalysisView({
     return months;
   };
 
-  // Helper function to check if a person was added before/on a given month
-  const wasPersonAddedByMonth = (person, monthKey: string): boolean => {
-    // Backward compatibility: if no dateAdded, assume person was added at the beginning
-    if (!person.dateAdded) {
-      return true;
-    }
-    
-    // Extract month from dateAdded (format: YYYY-MM-DD or YYYY-MM)
-    const personMonthKey = person.dateAdded.substring(0, 7); // "YYYY-MM"
-    
-    // Person is included if their dateAdded month is <= the target month
-    return personMonthKey <= monthKey;
-  };
-
   // Helper function to calculate stats without expired debt credits
   const calculatePersonStatsWithoutExpiredDebts = (
     personId,
@@ -2055,7 +2062,9 @@ function AnalysisView({
       {/* Individual Stats */}
       {selectedTab === "individual" && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {people.map((person, idx) => {
+          {people
+            .filter((person) => wasPersonActiveInMonth(person, monthKey))
+            .map((person, idx) => {
             const monthStats = calculatePersonStatsWithoutExpiredDebts(
               person.id,
               monthKey
@@ -2510,9 +2519,8 @@ function AnalysisView({
                       <tbody>
                         {people.map((person) => {
                           const monthData = historyMonthsToShow.map((m) => {
-                            const wasAdded = wasPersonAddedByMonth(person, m.key);
-                            if (!wasAdded) {
-                              return null; // Person wasn't added yet in this month
+                            if (!wasPersonActiveInMonth(person, m.key)) {
+                              return null; // Not a household member that month
                             }
                             return calculatePersonStatsWithoutExpiredDebts(
                               person.id,
@@ -2637,9 +2645,8 @@ function AnalysisView({
                       <tbody>
                         {people.map((person) => {
                           const monthData = historyMonthsToShow.map((m) => {
-                            const wasAdded = wasPersonAddedByMonth(person, m.key);
-                            if (!wasAdded) {
-                              return null; // Person wasn't added yet in this month
+                            if (!wasPersonActiveInMonth(person, m.key)) {
+                              return null; // Not a household member that month
                             }
                             return calculatePersonCommunityStats(person.id, m.key);
                           });
@@ -3049,7 +3056,11 @@ function AnalysisView({
                       </tr>
                     </thead>
                     <tbody>
-                      {people.map((person) => {
+                      {people
+                        .filter((person) =>
+                          wasPersonActiveInMonth(person, monthKey)
+                        )
+                        .map((person) => {
                         // Use stats WITHOUT expired debts to match Individual tab
                         const stats = calculatePersonStatsWithoutExpiredDebts(
                           person.id,

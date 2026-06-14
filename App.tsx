@@ -37,22 +37,41 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 const isActivePerson = (person) => !person?.archivedAt;
 const isArchivedPerson = (person) => !!person?.archivedAt;
 
+// Subtract one month from a "YYYY-MM" key. Used to derive a fallback
+// "last active month" from archivedAt for legacy data.
+const previousMonthKey = (monthKey: string): string => {
+  const [yearStr, monStr] = monthKey.split("-");
+  const year = parseInt(yearStr, 10);
+  const mon = parseInt(monStr, 10);
+  const d = new Date(year, mon - 2, 1); // mon-2 because months are 0-indexed
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+// Resolve a person's "last active month" (inclusive). Returns null if the
+// person is still active. Prefers the explicit lastActiveMonth field set
+// by the admin during archive; if absent but archivedAt exists (legacy
+// archives, like Brooke's), falls back to (archivedAt month - 1) on the
+// assumption that the admin clicked archive AFTER the person had stopped.
+const getLastActiveMonth = (person): string | null => {
+  if (person?.lastActiveMonth) return person.lastActiveMonth;
+  if (person?.archivedAt) {
+    const archivedMonth = person.archivedAt.substring(0, 7);
+    return previousMonthKey(archivedMonth);
+  }
+  return null;
+};
+
 // Whether a person was a household member during a given month (YYYY-MM).
-// True if their dateAdded month is <= monthKey AND (if archived) their
-// archivedAt month is >= monthKey. Missing bounds are treated as open
-// (back-compat: a person without dateAdded is assumed always-active).
-// Use this to gate month-scoped views (calendar legend, monthly stats,
-// fees table) so a new member doesn't appear in months before they joined
-// and an archived member doesn't appear after they left.
+// True if dateAdded month <= monthKey AND (if archived) lastActiveMonth >=
+// monthKey. Missing bounds are treated as open (back-compat: a person
+// without dateAdded is assumed always-active).
 const wasPersonActiveInMonth = (person, monthKey: string): boolean => {
   if (person?.dateAdded) {
     const addedMonth = person.dateAdded.substring(0, 7); // "YYYY-MM"
     if (addedMonth > monthKey) return false;
   }
-  if (person?.archivedAt) {
-    const archivedMonth = person.archivedAt.substring(0, 7); // "YYYY-MM"
-    if (archivedMonth < monthKey) return false;
-  }
+  const lastActive = getLastActiveMonth(person);
+  if (lastActive && lastActive < monthKey) return false;
   return true;
 };
 
@@ -3477,6 +3496,10 @@ function AdminView({
   const [editAssignmentFrequency, setEditAssignmentFrequency] = useState("");
   const [editAssignmentEffectiveDate, setEditAssignmentEffectiveDate] =
     useState("");
+  // Archive modal: holds the person being archived (or whose last-active
+  // month is being edited) plus the month picker value (YYYY-MM).
+  const [archivingPerson, setArchivingPerson] = useState(null);
+  const [archiveLastActiveMonth, setArchiveLastActiveMonth] = useState("");
 
   const dayNamesLong = [
     "Sunday",
@@ -3510,30 +3533,52 @@ function AdminView({
     }
   };
 
-  // Archive a person: hide them from selectors that create new records, but
-  // leave everything else (completions, assignments, debts, fees) intact so
-  // historical reporting stays accurate. To "transition" responsibilities,
-  // just add the new person and assign them to the relevant chores — two
-  // people can share an assignment without conflict.
-  const archivePerson = async (id) => {
-    const person = people.find((p) => p.id === id);
+  // Open the archive modal. Defaults the "last active month" to the
+  // previous month (covers the common case where the admin gets around to
+  // archiving someone weeks after they actually left). The same modal is
+  // reused to edit lastActiveMonth on an already-archived person.
+  const openArchiveModal = (person) => {
     if (!person) return;
-    const confirmMsg =
-      `Archive ${person.name}?\n\n` +
-      `Their full history is preserved — past completions, assignments, ` +
-      `debts, and fees stay exactly as they are. They will simply be hidden ` +
-      `from the "Who did the chore?" and assignment-creation dropdowns.\n\n` +
-      `You can unarchive them later.`;
-    if (!window.confirm(confirmMsg)) return;
+    const today = new Date();
+    // Default: previous month relative to today, or the existing value if
+    // we're editing an already-archived person.
+    const defaultMonth =
+      person.lastActiveMonth ||
+      (() => {
+        const prev = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+        return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(
+          2,
+          "0"
+        )}`;
+      })();
+    setArchivingPerson(person);
+    setArchiveLastActiveMonth(defaultMonth);
+  };
 
-    await updateDoc(doc(db, "people", id), {
-      archivedAt: new Date().toISOString(),
-    });
+  const closeArchiveModal = () => {
+    setArchivingPerson(null);
+    setArchiveLastActiveMonth("");
+  };
+
+  // Commit the archive (or last-active-month edit). Stores both archivedAt
+  // (audit: when the admin clicked) and lastActiveMonth (the value that
+  // actually gates visibility in monthly views).
+  const saveArchive = async () => {
+    if (!archivingPerson || !archiveLastActiveMonth) return;
+    const updates = {
+      lastActiveMonth: archiveLastActiveMonth,
+      archivedAt: archivingPerson.archivedAt || new Date().toISOString(),
+    };
+    await updateDoc(doc(db, "people", archivingPerson.id), updates);
+    closeArchiveModal();
   };
 
   const unarchivePerson = async (id) => {
+    // Clear both fields so a subsequent re-archive starts with a fresh
+    // month picker rather than inheriting the old end date.
     await updateDoc(doc(db, "people", id), {
       archivedAt: null,
+      lastActiveMonth: null,
     });
   };
 
@@ -3846,9 +3891,9 @@ function AdminView({
                       )}
                     </div>
                     <button
-                      onClick={() => archivePerson(person.id)}
+                      onClick={() => openArchiveModal(person)}
                       className="px-3 py-1.5 text-sm text-stone-600 hover:text-stone-900 hover:bg-stone-200 rounded-lg transition-colors flex items-center gap-1.5"
-                      title="Archive (preserves history, frees up assignments)"
+                      title="Archive (preserves history, lets you set their last active month)"
                     >
                       <svg
                         className="w-4 h-4"
@@ -3905,19 +3950,52 @@ function AdminView({
                           { month: "short", day: "numeric", year: "numeric" }
                         )
                       : null;
+                    const lastActive = getLastActiveMonth(person);
+                    const lastActiveLabel = lastActive
+                      ? (() => {
+                          const [y, m] = lastActive.split("-");
+                          return new Date(
+                            parseInt(y, 10),
+                            parseInt(m, 10) - 1,
+                            1
+                          ).toLocaleDateString("en-US", {
+                            month: "short",
+                            year: "numeric",
+                          });
+                        })()
+                      : null;
                     return (
                       <div
                         key={person.id}
                         className="flex items-center justify-between p-4 bg-stone-50/60 rounded-xl border border-stone-100"
                       >
-                        <div>
-                          <span className="font-medium text-stone-600">
-                            {person.name}
-                          </span>
-                          {archivedDate && (
-                            <span className="ml-2 text-xs text-stone-400">
-                              archived {archivedDate}
+                        <div className="min-w-0">
+                          <div>
+                            <span className="font-medium text-stone-600">
+                              {person.name}
                             </span>
+                            {archivedDate && (
+                              <span className="ml-2 text-xs text-stone-400">
+                                archived {archivedDate}
+                              </span>
+                            )}
+                          </div>
+                          {lastActiveLabel && (
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <span className="text-xs text-stone-500">
+                                Last active month:{" "}
+                                <span className="font-medium text-stone-700">
+                                  {lastActiveLabel}
+                                </span>
+                              </span>
+                              <button
+                                onClick={() => openArchiveModal(person)}
+                                className="text-xs text-stone-500 hover:text-stone-800 underline"
+                                title="Change the last active month"
+                              >
+                                edit
+                              </button>
+                            </div>
                           )}
                         </div>
                         <div className="flex items-center gap-2">
@@ -4678,6 +4756,58 @@ function AdminView({
                   className="flex-1 px-6 py-3 rounded-xl btn-primary text-white font-medium"
                 >
                   Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Archive / Edit-last-active-month Modal */}
+      {archivingPerson && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl card-shadow p-6 max-w-md w-full mx-4">
+            <h3 className="font-display text-xl font-semibold text-stone-800 mb-2">
+              {archivingPerson.archivedAt
+                ? `Edit ${archivingPerson.name}'s last active month`
+                : `Archive ${archivingPerson.name}`}
+            </h3>
+            <p className="text-sm text-stone-500 mb-5">
+              {archivingPerson.archivedAt
+                ? "Change the last month this person was counted as part of the household. All month-scoped charts and totals will adjust."
+                : "Their history is preserved. Pick the last month they were part of the household — they'll be counted through that month and hidden after."}
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Last active month
+                </label>
+                <input
+                  type="month"
+                  value={archiveLastActiveMonth}
+                  onChange={(e) =>
+                    setArchiveLastActiveMonth(e.target.value)
+                  }
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50"
+                />
+                <p className="mt-2 text-xs text-stone-500">
+                  Defaults to last month. Pick an earlier month if you're
+                  archiving someone who actually left a while ago.
+                </p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={closeArchiveModal}
+                  className="flex-1 px-6 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium hover:bg-stone-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveArchive}
+                  disabled={!archiveLastActiveMonth}
+                  className="flex-1 px-6 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {archivingPerson.archivedAt ? "Save" : "Archive"}
                 </button>
               </div>
             </div>

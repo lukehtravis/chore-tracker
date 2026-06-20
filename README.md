@@ -762,7 +762,14 @@ Months are identified using the format `"YYYY-MM"` (e.g., `"2024-03"`). This is 
    - Dropdown to select who did the chore
    - Dropdown to select which chore was done
    - Checkbox and selector for partial completions (optional)
-   - Dropdown to select **who the chore was done for** (can be the same person)
+   - Dropdown to select **who the chore was done for** — appears whenever the
+     chore has assignees and either (a) the doer is not one of them, or (b)
+     there are multiple assignees (so a co-assignee can credit another
+     co-assignee and issue a debt). When the doer is one of the assignees, the
+     dropdown defaults to the doer themselves so the "did it for myself" case
+     needs no extra click. When the doer is not an assignee, the dropdown is
+     blank and a pick is required. The dropdown is hidden only when the doer is
+     the sole assignee, since there is no one else to credit.
    - If the chore is done for someone else and will create a new debt, a **due date** field is required
    - Note indicating who will receive credit (the person the chore was done for)
    

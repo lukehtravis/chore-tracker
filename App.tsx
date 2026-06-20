@@ -780,13 +780,44 @@ function RecordChoreModal({
   const isCrossPerson =
     selectedPerson && forPersonId && selectedPerson !== forPersonId;
 
-  // Only show "Who was this chore for?" when there are assignees for this chore
-  // and the person who did it is NOT one of those assignees.
+  // Show "Who was this chore for?" when:
+  // - The doer is NOT one of the assignees (must pick which assignee they did it for), OR
+  // - There are multiple assignees — even if the doer is one of them — so they can
+  //   credit a co-assignee (issuing a debt) instead of always being assumed to be
+  //   doing it for themselves.
   const shouldShowForPersonDropdown =
     hasAssigneesForChore &&
     !!selectedChore &&
     !!selectedPerson &&
-    !isPersonAssignedToSelectedChore;
+    (!isPersonAssignedToSelectedChore || assignedPeopleForChore.length > 1);
+
+  // When the doer is one of multiple co-assignees, default "for person" to the doer
+  // themselves so the natural "I did this for myself" case needs no extra click,
+  // while still allowing them to pick a co-assignee to issue a debt to.
+  // Reset forPersonId whenever the chore or person changes so a stale selection
+  // from a prior chore can't leak through.
+  useEffect(() => {
+    if (!shouldShowForPersonDropdown) {
+      if (forPersonId !== "") setForPersonId("");
+      return;
+    }
+    // If the currently selected forPersonId is no longer a valid assignee
+    // (e.g. user switched chores), clear it.
+    const stillValid =
+      !!forPersonId &&
+      assignedPeopleForChore.some((p) => p.id === forPersonId);
+    if (!stillValid) {
+      // Default to the doer when they are themselves an assignee; otherwise leave
+      // it empty so the user is forced to pick a co-assignee (existing cross-person flow).
+      setForPersonId(isPersonAssignedToSelectedChore ? selectedPerson : "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    selectedPerson,
+    selectedChore,
+    shouldShowForPersonDropdown,
+    isPersonAssignedToSelectedChore,
+  ]);
 
   // Determine if there are existing open debts between selectedPerson (debtor) and forPersonId (creditor)
   const openDebtsBetween =

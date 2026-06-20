@@ -162,6 +162,7 @@ Community credits always reduce fees (never increase them).
 **RecordChoreModal:**
 - Mode toggle: Individual vs Community (top-right)
 - Individual mode: person, chore, partial completion, forPersonId, dueDate (if cross-person)
+- "Who was this chore for?" dropdown appears whenever the chore has assignees AND (doer is not an assignee OR there is more than one assignee). When the doer is one of the assignees, forPersonId defaults to the doer so the self-completion case needs no extra click; co-assignees remain selectable so one co-assignee can credit another and issue a debt. Hidden only when the doer is the chore's sole assignee.
 - Community mode: person, community chore type, minutes (1-999)
 - Handles debt creation/payment logic on save
 

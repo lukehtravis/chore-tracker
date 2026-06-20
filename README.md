@@ -504,20 +504,22 @@ Debts are tracked as explicit `Debt` documents and are based on **who a chore wa
    - For a cross-person completion where `completedBy = X` and `forPersonId = Y`, the system looks for open debts where:
      - `debtorId === X` and `creditorId === Y`
      - `remainingMinutes > 0`
-   - If such debts exist, the completion is treated as a **payment**:
-     - The completion's minutes are applied oldest-first across those debts.
+   - If such debts exist, the completion's minutes are split into a **payment portion** (capped at the sum of `remainingMinutes` across those open debts) and a **leftover portion** (any minutes beyond that). The payment portion is applied oldest-first:
      - For each application:
        - A `DebtPayment` record is created.
        - The corresponding `Debt.remainingMinutes` is reduced.
      - When a debt is fully paid (`remainingMinutes <= 0`), the source completion's `isProvisional` is set to `false`.
 
 3. **Creating new debts**:
-   - If no open debts exist from `completedBy` to `forPersonId` when recording a cross-person completion, a **new `Debt` document** is created:
+   - A new `Debt` document is created whenever a cross-person completion includes a leftover portion. There are two cases:
+     - **Pure new debt**: no open debts from `X` to `Y` exist, so the entire `completion.minutes` becomes the new debt.
+     - **Mixed payment + new debt**: existing debts cover only part of the new completion (e.g. X owes Y 20 min and X does a 45-min chore for Y) — the 20 are applied as a payment and the leftover 25 become a new debt with polarity flipped.
+   - The new `Debt` has:
      - `creditorId = completedBy`
      - `debtorId = forPersonId`
-     - `originalMinutes = remainingMinutes = completion.minutes`
+     - `originalMinutes = remainingMinutes = leftover minutes`
      - `dueDate` is manually selected in the UI when saving the completion.
-     - The source completion is marked with `isProvisional: true` and `sourceDebtId: debtId`.
+   - **Split completion records (mixed case only)**: in the mixed case, the save writes **two** completion records — one non-provisional record for the payment portion (used as `DebtPayment.completionId`) and one provisional record for the leftover portion with `isProvisional: true` and `sourceDebtId` pointing to the new debt. This ensures the stats-exclusion logic for an expired leftover debt only retracts the leftover credit, never the payment portion that already cleared an old debt.
 
 4. **Debt expiration**:
    - A debt expires when `dueDate < today` AND `remainingMinutes > 0`.

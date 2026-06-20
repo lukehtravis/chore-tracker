@@ -836,8 +836,33 @@ function RecordChoreModal({
           })
       : [];
 
-  const isPayment = isCrossPerson && openDebtsBetween.length > 0;
-  const isNewDebt = isCrossPerson && openDebtsBetween.length === 0;
+  // How many minutes will be applied this save, for UI prediction. Use the
+  // historical chore-minutes value so the UI prediction matches handleSave
+  // (which calls getChoreMinutesAtDate) when chore minutes were edited.
+  const previewMinutesDone = isPartial
+    ? parseInt(partialMinutes || "0", 10) || 0
+    : selectedChoreObj && date
+    ? getChoreMinutesAtDate(selectedChoreObj, date)
+    : selectedChoreObj?.minutes || 0;
+
+  const totalOpenDebt = openDebtsBetween.reduce(
+    (sum, d) => sum + (d.remainingMinutes ?? d.originalMinutes ?? 0),
+    0
+  );
+
+  // Split the completion's minutes between an existing-debt-payment portion
+  // (applied oldest-first) and a leftover portion that becomes a new debt with
+  // the polarity flipped (forPerson now owes selectedPerson).
+  const paymentMinutesPreview = isCrossPerson
+    ? Math.min(previewMinutesDone, totalOpenDebt)
+    : 0;
+  const newDebtMinutesPreview = isCrossPerson
+    ? Math.max(0, previewMinutesDone - totalOpenDebt)
+    : 0;
+
+  const isPayment = isCrossPerson && paymentMinutesPreview > 0;
+  const willCreateNewDebt = isCrossPerson && newDebtMinutesPreview > 0;
+  const isMixedPaymentAndDebt = isPayment && willCreateNewDebt;
 
   const getMinuteOptions = () => {
     if (!selectedChoreObj || !selectedChoreObj.minutes) return [];
@@ -865,8 +890,9 @@ function RecordChoreModal({
       // Individual mode validation
       if (!selectedPerson || !selectedChore) return;
       if (isPartial && !partialMinutes) return;
-      if (isNewDebt && !dueDate) {
+      if (willCreateNewDebt && !dueDate) {
         // Require a due date when this completion will create a new debt
+        // (either pure new debt, or mixed payment + leftover new debt)
         return;
       }
     }
@@ -905,106 +931,145 @@ function RecordChoreModal({
       return;
     }
 
-    // Individual completion (existing logic)
+    // Individual completion
     const chore = chores.find((c) => c.id === selectedChore);
     const minutesDone = isPartial
       ? parseInt(partialMinutes, 10)
       : chore ? getChoreMinutesAtDate(chore, date) : 0;
 
-    // Determine if this will create a new debt (needed for isProvisional)
-    let debtIdForCompletion = undefined;
-    if (isNewDebt) {
-      debtIdForCompletion = generateId();
-    }
+    // Re-derive the payment / leftover split here using minutesDone (which
+    // respects historical chore-minute values), not the UI preview value.
+    const paymentMinutes = isCrossPerson
+      ? Math.min(minutesDone, totalOpenDebt)
+      : 0;
+    const leftoverMinutes = isCrossPerson
+      ? Math.max(0, minutesDone - totalOpenDebt)
+      : 0;
+    const willPayDebts = paymentMinutes > 0;
+    const willCreateLeftoverDebt = leftoverMinutes > 0;
+    const isMixed = willPayDebts && willCreateLeftoverDebt;
 
-    // Build completion object - only include optional fields if they have values
-    const completionData = {
-      id: completionId,
+    // When mixed, we write TWO completion records so the stats-exclusion logic
+    // for expired debts only retracts the leftover (provisional) credit, not
+    // the payment portion. When not mixed, the single record reuses completionId.
+    const paymentCompletionId = completionId;
+    const leftoverCompletionId = isMixed ? generateId() : completionId;
+    const newDebtId = willCreateLeftoverDebt ? generateId() : undefined;
+
+    const baseCompletion = {
       date,
       completedBy: selectedPerson,
       choreId: selectedChore,
-      minutes: minutesDone,
       createdAt: nowIso,
       type: "individual",
-      // Who this chore was done for; can be the same as selectedPerson
       // If not explicitly chosen, default to the person who did the chore
       forPersonId: forPersonId || selectedPerson,
-      // Only add provisional fields if creating a new debt (Firebase doesn't allow undefined)
-      ...(isNewDebt && debtIdForCompletion
-        ? {
-            isProvisional: true,
-            sourceDebtId: debtIdForCompletion,
-          }
-        : {}),
     };
 
-    await setDoc(doc(db, "completions", completionId), completionData);
+    if (!isCrossPerson) {
+      // Self-completion: single non-provisional record.
+      await setDoc(doc(db, "completions", paymentCompletionId), {
+        ...baseCompletion,
+        id: paymentCompletionId,
+        minutes: minutesDone,
+      });
+    } else if (isMixed) {
+      // Mixed: payment portion is permanent credit (clears existing debt);
+      // leftover portion is provisional until the new debt is paid.
+      await setDoc(doc(db, "completions", paymentCompletionId), {
+        ...baseCompletion,
+        id: paymentCompletionId,
+        minutes: paymentMinutes,
+      });
+      await setDoc(doc(db, "completions", leftoverCompletionId), {
+        ...baseCompletion,
+        id: leftoverCompletionId,
+        minutes: leftoverMinutes,
+        isProvisional: true,
+        sourceDebtId: newDebtId,
+      });
+    } else if (willPayDebts) {
+      // Pure payment: single non-provisional record for full minutesDone.
+      await setDoc(doc(db, "completions", paymentCompletionId), {
+        ...baseCompletion,
+        id: paymentCompletionId,
+        minutes: minutesDone,
+      });
+    } else if (willCreateLeftoverDebt) {
+      // Pure new debt: single provisional record tied to the new debt.
+      await setDoc(doc(db, "completions", leftoverCompletionId), {
+        ...baseCompletion,
+        id: leftoverCompletionId,
+        minutes: minutesDone,
+        isProvisional: true,
+        sourceDebtId: newDebtId,
+      });
+    }
 
     // Debt logic:
-    // - If the chore was done for another person (forPersonId !== selectedPerson),
-    //   and there are existing debts where selectedPerson is the debtor and
-    //   forPersonId is the creditor, auto-apply minutes oldest-first as payments.
-    // - If there are no such existing debts, create a new debt from forPersonId (debtor)
-    //   to selectedPerson (creditor) for the full minutesDone, with a manually chosen dueDate.
-    if (isCrossPerson) {
-      if (isPayment) {
-        let pool = minutesDone;
-        for (const debt of openDebtsBetween) {
-          const remaining = debt.remainingMinutes ?? debt.originalMinutes ?? 0;
-          if (remaining <= 0 || pool <= 0) continue;
-          const apply = Math.min(pool, remaining);
-          if (apply <= 0) continue;
+    // - paymentMinutes are applied oldest-first as payments against existing
+    //   debts where selectedPerson is the debtor and forPersonId is the creditor.
+    // - leftoverMinutes (if any) create a new debt with the polarity flipped:
+    //   forPersonId becomes the debtor, selectedPerson the creditor. Both can
+    //   happen in the same save (mixed case): part pays off an old debt,
+    //   part creates a new one — required since otherwise the leftover would
+    //   silently be lost.
+    if (willPayDebts) {
+      let pool = paymentMinutes;
+      for (const debt of openDebtsBetween) {
+        const remaining = debt.remainingMinutes ?? debt.originalMinutes ?? 0;
+        if (remaining <= 0 || pool <= 0) continue;
+        const apply = Math.min(pool, remaining);
+        if (apply <= 0) continue;
 
-          const paymentId = generateId();
-          await setDoc(doc(db, "debtPayments", paymentId), {
-            id: paymentId,
-            debtId: debt.id,
-            completionId: completionId,
-            minutesApplied: apply,
-            createdAt: nowIso,
-          });
-
-          const newRemaining = remaining - apply;
-          await updateDoc(doc(db, "debts", debt.id), {
-            remainingMinutes: newRemaining,
-          });
-
-          // If debt is fully paid, mark source completion as permanent
-          if (newRemaining <= 0) {
-            const sourceCompletion = completions.find(
-              (c) => c.id === debt.sourceCompletionId
-            );
-            if (sourceCompletion && sourceCompletion.isProvisional) {
-              await updateDoc(doc(db, "completions", sourceCompletion.id), {
-                isProvisional: false,
-              });
-            }
-          }
-
-          pool -= apply;
-          if (pool <= 0) break;
-        }
-      } else if (isNewDebt) {
-        const debtId = debtIdForCompletion || generateId();
-        // Build debt object - only include optional fields if they have values
-        const debtData = {
-          id: debtId,
-          creditorId: selectedPerson,
-          debtorId: forPersonId,
-          choreId: selectedChore,
-          originalMinutes: minutesDone,
-          remainingMinutes: minutesDone,
+        const paymentId = generateId();
+        await setDoc(doc(db, "debtPayments", paymentId), {
+          id: paymentId,
+          debtId: debt.id,
+          completionId: paymentCompletionId,
+          minutesApplied: apply,
           createdAt: nowIso,
-          // Store the date string directly; we can interpret it as needed in the UI
-          dueDate: dueDate || null,
-          sourceCompletionId: completionId,
-          // NEW FIELDS: Track expiration and fee calculation status
-          feeCalculated: false,
-        };
-        // Only add expiredAt if it has a value (it won't initially)
-        // This field will be set later when the debt expires
-        await setDoc(doc(db, "debts", debtId), debtData);
+        });
+
+        const newRemaining = remaining - apply;
+        await updateDoc(doc(db, "debts", debt.id), {
+          remainingMinutes: newRemaining,
+        });
+
+        // If debt is fully paid, mark source completion as permanent
+        if (newRemaining <= 0) {
+          const sourceCompletion = completions.find(
+            (c) => c.id === debt.sourceCompletionId
+          );
+          if (sourceCompletion && sourceCompletion.isProvisional) {
+            await updateDoc(doc(db, "completions", sourceCompletion.id), {
+              isProvisional: false,
+            });
+          }
+        }
+
+        pool -= apply;
+        if (pool <= 0) break;
       }
+    }
+
+    if (willCreateLeftoverDebt && newDebtId) {
+      const debtData = {
+        id: newDebtId,
+        creditorId: selectedPerson,
+        debtorId: forPersonId,
+        choreId: selectedChore,
+        originalMinutes: leftoverMinutes,
+        remainingMinutes: leftoverMinutes,
+        createdAt: nowIso,
+        // Store the date string directly; we can interpret it as needed in the UI
+        dueDate: dueDate || null,
+        sourceCompletionId: leftoverCompletionId,
+        // Track expiration and fee calculation status
+        feeCalculated: false,
+      };
+      // expiredAt is intentionally omitted; it's set later when the debt expires
+      await setDoc(doc(db, "debts", newDebtId), debtData);
     }
 
     setSaving(false);
@@ -1245,15 +1310,26 @@ function RecordChoreModal({
                       This will credit{" "}
                       {people.find((p) => p.id === forPersonId)?.name ||
                         "this person"}
-                      's stats
-                      {isNewDebt ? " (provisional until debt is paid)" : ""}
+                      's stats.
                       {isPayment && (
                         <>
-                          . There are existing open debts where{" "}
+                          {" "}
+                          {paymentMinutesPreview} min will pay down existing
+                          debts where{" "}
                           {people.find((p) => p.id === selectedPerson)?.name}{" "}
-                          owes {people.find((p) => p.id === forPersonId)?.name}.
-                          This completion will automatically pay down the oldest
-                          debts first.
+                          owes{" "}
+                          {people.find((p) => p.id === forPersonId)?.name}{" "}
+                          (oldest first).
+                        </>
+                      )}
+                      {willCreateNewDebt && (
+                        <>
+                          {" "}
+                          {newDebtMinutesPreview} min will create a
+                          {isMixedPaymentAndDebt ? " new" : ""} debt where{" "}
+                          {people.find((p) => p.id === forPersonId)?.name} owes{" "}
+                          {people.find((p) => p.id === selectedPerson)?.name}{" "}
+                          (provisional until paid).
                         </>
                       )}
                     </p>
@@ -1261,8 +1337,10 @@ function RecordChoreModal({
                 </div>
               )}
 
-              {/* Due date for new debts */}
-              {!isCommunityMode && isNewDebt && (
+              {/* Due date — required whenever a new debt will be created,
+                  including the mixed case where part of this completion pays
+                  off an existing debt and the leftover starts a new one. */}
+              {!isCommunityMode && willCreateNewDebt && (
                 <div>
                   <label className="block text-sm font-medium text-stone-700 mb-2">
                     Due date for this favor
@@ -1274,8 +1352,9 @@ function RecordChoreModal({
                     className="w-full px-4 py-3 rounded-xl border border-stone-200 bg-stone-50 text-stone-800"
                   />
                   <p className="mt-1 text-xs text-stone-500">
-                    This is when the person you did this for should pay you back
-                    by.
+                    {isMixedPaymentAndDebt
+                      ? `${newDebtMinutesPreview} min of this completion will create a new debt — this is when the person you did it for should pay you back by.`
+                      : "This is when the person you did this for should pay you back by."}
                   </p>
                 </div>
               )}
@@ -1301,7 +1380,7 @@ function RecordChoreModal({
                 : !selectedPerson ||
                   !selectedChore ||
                   (isPartial && !partialMinutes) ||
-                  (isNewDebt && !dueDate) ||
+                  (willCreateNewDebt && !dueDate) ||
                   (shouldShowForPersonDropdown && !forPersonId))
             }
             className="flex-1 px-4 py-3 rounded-xl btn-primary text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"

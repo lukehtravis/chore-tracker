@@ -112,8 +112,10 @@ const communityCompletions = completions.filter(c => c.type === "community");
 
 **Debt Creation:**
 - When Person A does a chore for Person B (cross-person completion), check for existing debts first
-- If debts exist where `debtorId === A` and `creditorId === B`, apply completion as payment (oldest-first)
-- If no debts exist in that direction, create a new `Debt` record with a `dueDate`
+- The completion's minutes are split into a **payment portion** (≤ sum of open `remainingMinutes` from A→B) and a **leftover portion** (anything beyond that)
+- Payment portion: applied oldest-first to existing A→B debts (one `DebtPayment` per debt touched)
+- Leftover portion (if > 0): a new `Debt` is created with `creditorId = A`, `debtorId = B`, `originalMinutes = remainingMinutes = leftover`, and a `dueDate` collected in the UI
+- Mixed case (both payment + leftover > 0): the save writes **two completion records** — non-provisional for the payment portion, provisional (with `sourceDebtId` = new leftover debt) for the leftover. This is required so the expired-debt stats exclusion only retracts the leftover credit, not the payment portion.
 
 **Debt Expiration:**
 - Debts expire when `dueDate < today` AND `remainingMinutes > 0`

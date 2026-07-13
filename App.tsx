@@ -14,6 +14,10 @@ import {
   getChoreNameAtDate,
   getAssignmentFrequencyAtDate,
 } from "./utils/historical";
+import {
+  planCompletionDeletion,
+  isMonthLocked,
+} from "./utils/completionDeletion";
 
 // Firebase config - loaded from environment variables
 const firebaseConfig = {
@@ -128,6 +132,49 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState(null);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [showRecordModal, setShowRecordModal] = useState(false);
+  const [selectedCompletion, setSelectedCompletion] = useState(null);
+
+  // Delete a completion and clean up any debts / debt payments / provisional
+  // flags that were coupled to it. Blocked when the completion's month is
+  // finalized (all monthly fees processed). Returns true on success.
+  const deleteCompletionWithCleanup = async (completion) => {
+    if (!completion) return false;
+    const monthKey = completion.date?.substring(0, 7);
+    if (monthKey && isMonthLocked(monthKey, monthlyFees)) {
+      return false;
+    }
+
+    const plan = planCompletionDeletion(
+      completion,
+      debts,
+      debtPayments,
+      completions
+    );
+
+    // Restore reopened debt balances first.
+    for (const upd of plan.updateDebts) {
+      await updateDoc(doc(db, "debts", upd.id), {
+        remainingMinutes: upd.remainingMinutes,
+      });
+    }
+    // Re-flag originating completions as provisional again.
+    for (const cId of plan.markProvisionalCompletionIds) {
+      await updateDoc(doc(db, "completions", cId), { isProvisional: true });
+    }
+    // Delete debt payment rows.
+    for (const pId of plan.deleteDebtPaymentIds) {
+      await deleteDoc(doc(db, "debtPayments", pId));
+    }
+    // Delete debts this completion created.
+    for (const dId of plan.deleteDebtIds) {
+      await deleteDoc(doc(db, "debts", dId));
+    }
+    // Delete the completion(s).
+    for (const cId of plan.deleteCompletionIds) {
+      await deleteDoc(doc(db, "completions", cId));
+    }
+    return true;
+  };
 
   // Firebase listeners
   useEffect(() => {
@@ -389,6 +436,8 @@ export default function App() {
             setShowRecordModal={setShowRecordModal}
             assignments={assignments}
             communityChoreTypes={communityChoreTypes}
+            monthlyFees={monthlyFees}
+            onSelectCompletion={setSelectedCompletion}
             db={db}
           />
         )}
@@ -436,6 +485,25 @@ export default function App() {
           db={db}
         />
       )}
+
+      {/* Completion Detail / Delete Modal */}
+      {selectedCompletion && (
+        <CompletionDetailModal
+          completion={selectedCompletion}
+          people={people}
+          chores={chores}
+          communityChoreTypes={communityChoreTypes}
+          debts={debts}
+          debtPayments={debtPayments}
+          completions={completions}
+          locked={isMonthLocked(
+            selectedCompletion.date?.substring(0, 7),
+            monthlyFees
+          )}
+          onDelete={deleteCompletionWithCleanup}
+          onClose={() => setSelectedCompletion(null)}
+        />
+      )}
     </div>
   );
 }
@@ -453,6 +521,8 @@ function CalendarView({
   setShowRecordModal,
   assignments,
   communityChoreTypes,
+  monthlyFees,
+  onSelectCompletion,
   db,
 }) {
   const year = currentMonth.getFullYear();
@@ -460,6 +530,10 @@ function CalendarView({
   const daysInMonth = getDaysInMonth(year, month);
   const firstDay = getFirstDayOfMonth(year, month);
   const monthKey = getMonthKey(currentMonth);
+  // A month is "finalized" once it has monthly fees and all are processed.
+  // When finalized, completions can't be added or deleted (the month is frozen
+  // so past fee calculations stay accurate).
+  const monthLocked = isMonthLocked(monthKey, monthlyFees || []);
 
   const monthCompletions = completions.filter((c) =>
     c.date.startsWith(monthKey)
@@ -606,25 +680,48 @@ function CalendarView({
               new Date().toDateString() ===
               new Date(year, month, day).toDateString();
 
+            const openAddForDay = () => {
+              // Finalized months are frozen — can't add new completions.
+              if (monthLocked) return;
+              setSelectedDate(`${monthKey}-${String(day).padStart(2, "0")}`);
+              setShowRecordModal(true);
+            };
+
             return (
-              <button
+              <div
                 key={day}
-                onClick={() => {
-                  setSelectedDate(
-                    `${monthKey}-${String(day).padStart(2, "0")}`
-                  );
-                  setShowRecordModal(true);
+                role="button"
+                tabIndex={0}
+                onClick={openAddForDay}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openAddForDay();
+                  }
                 }}
-                className={`calendar-day p-3 min-h-[100px] border-t border-l border-stone-100 text-left transition-all hover:bg-stone-50 ${
-                  isToday ? "bg-amber-50/50" : ""
-                }`}
+                title={
+                  monthLocked
+                    ? "This month is finalized — completions are locked"
+                    : "Click empty space to record a chore"
+                }
+                className={`calendar-day p-3 min-h-[100px] border-t border-l border-stone-100 text-left transition-all ${
+                  monthLocked ? "cursor-default" : "cursor-pointer hover:bg-stone-50"
+                } ${isToday ? "bg-amber-50/50" : ""}`}
               >
                 <div
-                  className={`text-sm font-medium mb-2 ${
+                  className={`text-sm font-medium mb-2 flex items-center gap-1 ${
                     isToday ? "text-amber-600" : "text-stone-700"
                   }`}
                 >
                   {day}
+                  {monthLocked && (
+                    <span
+                      className="text-stone-400"
+                      title="Finalized — locked"
+                    >
+                      🔒
+                    </span>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-1">
                   {dayCompletions.map((completion, idx) => {
@@ -644,15 +741,20 @@ function CalendarView({
                       );
 
                       return (
-                        <div
+                        <button
                           key={idx}
-                          className="px-2 py-0.5 rounded-sm bg-cyan-500 text-white text-xs font-medium whitespace-nowrap"
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectCompletion(completion);
+                          }}
+                          className="px-2 py-0.5 rounded-sm bg-cyan-500 text-white text-xs font-medium whitespace-nowrap cursor-pointer hover:ring-2 hover:ring-cyan-300 transition-shadow"
                           title={`Community: ${typeName} - ${
                             completion.minutes
-                          } min (by ${completedByPerson?.name || "Unknown"})`}
+                          } min (by ${completedByPerson?.name || "Unknown"}) — click to view/delete`}
                         >
                           {displayName}
-                        </div>
+                        </button>
                       );
                     }
 
@@ -677,9 +779,14 @@ function CalendarView({
                     const isProvisional = completion.isProvisional;
 
                     return (
-                      <div
+                      <button
                         key={idx}
-                        className={`completion-dot px-2 py-0.5 rounded-full text-white text-xs font-medium whitespace-nowrap ${
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectCompletion(completion);
+                        }}
+                        className={`completion-dot px-2 py-0.5 rounded-full text-white text-xs font-medium whitespace-nowrap cursor-pointer hover:ring-2 hover:ring-white/70 transition-shadow ${
                           isProvisional
                             ? "opacity-90 border border-dashed border-white/50"
                             : ""
@@ -689,14 +796,14 @@ function CalendarView({
                         }}
                         title={`${creditPerson?.name}: ${choreName}${
                           isProvisional ? " (provisional)" : ""
-                        }`}
+                        } — click to view/delete`}
                       >
                         {displayName}
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -704,8 +811,209 @@ function CalendarView({
 
       {/* Instructions */}
       <p className="mt-6 text-center text-sm text-stone-500">
-        Click on any day to record a completed chore
+        {monthLocked
+          ? "This month is finalized — completions are locked and can't be added or deleted."
+          : "Click an empty part of a day to record a chore, or click an existing chore to view or delete it."}
       </p>
+    </div>
+  );
+}
+
+// Completion Detail / Delete Modal
+// Shows a single recorded completion and lets the user delete it. Editing is
+// intentionally not offered — to change a completion, delete it and re-record.
+function CompletionDetailModal({
+  completion,
+  people,
+  chores,
+  communityChoreTypes,
+  debts,
+  debtPayments,
+  completions,
+  locked,
+  onDelete,
+  onClose,
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const isCommunity = completion.type === "community";
+
+  const chore = isCommunity
+    ? null
+    : chores.find((c) => c.id === completion.choreId);
+  const communityType = isCommunity
+    ? communityChoreTypes.find((t) => t.id === completion.communityChoreTypeId)
+    : null;
+
+  const title = isCommunity
+    ? communityType?.name || "Community chore"
+    : chore
+    ? getChoreNameAtDate(chore, completion.date)
+    : "Chore";
+
+  const creditPersonId = completion.forPersonId || completion.completedBy;
+  const creditPerson = people.find((p) => p.id === creditPersonId);
+  const completedByPerson = people.find((p) => p.id === completion.completedBy);
+  const isCrossPerson =
+    !isCommunity &&
+    completion.forPersonId &&
+    completion.forPersonId !== completion.completedBy;
+
+  // Preview what deleting will also touch, so the confirmation is honest.
+  const plan = planCompletionDeletion(
+    completion,
+    debts,
+    debtPayments,
+    completions
+  );
+  const removesDebt = plan.deleteDebtIds.length > 0;
+  const reversesPayment =
+    plan.updateDebts.length > 0 || plan.markProvisionalCompletionIds.length > 0;
+
+  const formattedDate = new Date(
+    completion.date + "T12:00:00"
+  ).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    const ok = await onDelete(completion);
+    setDeleting(false);
+    if (ok) onClose();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-2xl card-shadow w-full max-w-md p-6 fade-in"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between mb-1">
+          <h3 className="font-display text-xl font-semibold text-stone-800">
+            {title}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-stone-400 hover:text-stone-600 text-xl leading-none"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <p className="text-sm text-stone-500 mb-4">{formattedDate}</p>
+
+        <div className="space-y-2 text-sm text-stone-700 mb-6">
+          <div className="flex justify-between">
+            <span className="text-stone-500">Type</span>
+            <span>{isCommunity ? "Community" : "Individual"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-stone-500">Minutes</span>
+            <span>{completion.minutes} min</span>
+          </div>
+          {isCommunity ? (
+            <div className="flex justify-between">
+              <span className="text-stone-500">Done by</span>
+              <span>{completedByPerson?.name || "Unknown"}</span>
+            </div>
+          ) : (
+            <>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Credited to</span>
+                <span>{creditPerson?.name || "Unknown"}</span>
+              </div>
+              {isCrossPerson && (
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Done by</span>
+                  <span>{completedByPerson?.name || "Unknown"}</span>
+                </div>
+              )}
+              {completion.isProvisional && (
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Status</span>
+                  <span className="text-amber-600">
+                    Provisional (unpaid debt)
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+          {completion.description && (
+            <div className="flex justify-between">
+              <span className="text-stone-500">Note</span>
+              <span className="text-right max-w-[60%]">
+                {completion.description}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {locked ? (
+          <div className="rounded-xl bg-stone-100 p-4 text-sm text-stone-600">
+            🔒 This month has been finalized (all fees processed). Completions
+            are locked and can't be deleted.
+          </div>
+        ) : !confirming ? (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="w-full py-3 rounded-xl bg-red-50 text-red-600 font-medium hover:bg-red-100 transition-colors"
+          >
+            Delete this completion
+          </button>
+        ) : (
+          <div className="space-y-3">
+            {(removesDebt || reversesPayment) && (
+              <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+                Heads up — this completion is tied to a debt. Deleting it will
+                also:
+                <ul className="list-disc list-inside mt-1 space-y-0.5">
+                  {removesDebt && (
+                    <li>remove the debt it created and any payments toward it</li>
+                  )}
+                  {reversesPayment && (
+                    <li>
+                      restore the balance on the debt(s) it paid and re-mark
+                      them as unpaid
+                    </li>
+                  )}
+                </ul>
+              </div>
+            )}
+            <p className="text-sm text-stone-600">
+              Delete this completion? This can't be undone (you can re-record it
+              afterward).
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                disabled={deleting}
+                className="flex-1 py-3 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleting}
+                className="flex-1 py-3 rounded-xl bg-red-600 text-white font-medium hover:bg-red-700 transition-colors disabled:opacity-60"
+              >
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -3380,7 +3688,7 @@ function AnalysisView({
                                 </span>
                               </td>
                               <td className="p-4 text-center">
-                                {!monthlyFee.processed && (
+                                {!monthlyFee.processed ? (
                                   <button
                                     onClick={async () => {
                                       await updateDoc(
@@ -3391,6 +3699,19 @@ function AnalysisView({
                                     className="text-xs text-stone-600 hover:text-stone-800 underline"
                                   >
                                     Mark Processed
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={async () => {
+                                      await updateDoc(
+                                        doc(db, "monthlyFees", monthlyFee.id),
+                                        { processed: false }
+                                      );
+                                    }}
+                                    className="text-xs text-amber-600 hover:text-amber-800 underline"
+                                    title="Revert this fee to Pending — removes it from the running tally and unfreezes the month so it can be edited and recalculated"
+                                  >
+                                    Unprocess
                                   </button>
                                 )}
                               </td>

@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Transient Vite config bundles
+vite.config.js.timestamp-*
+
 # Environment variables
 .env
 .env.local
